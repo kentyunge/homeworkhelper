@@ -1,0 +1,118 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "katex/dist/katex.min.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-glow: var(--glow);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* One theme: a dark, heads-up-display look. Math and text stay high-contrast. */
+:root {
+  --radius: 0.75rem;
+  --background: oklch(0.16 0.03 260);
+  --foreground: oklch(0.96 0.01 240);
+  --card: oklch(0.21 0.035 260);
+  --card-foreground: oklch(0.96 0.01 240);
+  --popover: oklch(0.22 0.035 260);
+  --popover-foreground: oklch(0.96 0.01 240);
+  --primary: oklch(0.78 0.13 210);
+  --primary-foreground: oklch(0.18 0.04 250);
+  --secondary: oklch(0.28 0.04 260);
+  --secondary-foreground: oklch(0.96 0.01 240);
+  --muted: oklch(0.26 0.03 260);
+  --muted-foreground: oklch(0.74 0.03 250);
+  --accent: oklch(0.3 0.05 255);
+  --accent-foreground: oklch(0.96 0.01 240);
+  --destructive: oklch(0.7 0.19 22);
+  --border: oklch(1 0 0 / 11%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.78 0.13 210);
+  --glow: oklch(0.82 0.14 205);
+  --ok: oklch(0.78 0.16 155);
+  --warn: oklch(0.82 0.15 80);
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    background-image: radial-gradient(ellipse 80% 50% at 50% -10%, oklch(0.35 0.09 240 / 45%), transparent);
+    background-attachment: fixed;
+  }
+}
+
+/* Typeset math a touch larger than body text so exponents and fractions are easy to read. */
+.katex {
+  font-size: 1.12em;
+}
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25rem 0;
+}
+
+/* ---------- the assistant orb ---------- */
+@keyframes orb-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.06); opacity: 1; }
+}
+@keyframes orb-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes orb-talk {
+  0%, 100% { transform: scale(1); }
+  25% { transform: scale(1.12); }
+  60% { transform: scale(0.96); }
+}
+@keyframes orb-ring {
+  0% { transform: scale(0.9); opacity: 0.7; }
+  100% { transform: scale(1.7); opacity: 0; }
+}
+.orb-core {
+  background: radial-gradient(circle at 35% 30%, oklch(0.97 0.05 200), oklch(0.78 0.14 210) 35%, oklch(0.45 0.15 255) 75%, oklch(0.3 0.1 265));
+  box-shadow: 0 0 24px oklch(0.8 0.14 205 / 60%), 0 0 60px oklch(0.6 0.15 240 / 35%);
+  animation: orb-breathe 4s ease-in-out infinite;
+}
+.orb[data-state="thinking"] .orb-swirl {
+  animation: orb-spin 1.2s linear infinite;
+}
+.orb[data-state="speaking"] .orb-core {
+  animation: orb-talk 0.45s ease-in-out infinite;
+}
+.orb[data-state="listening"] .orb-ring {
+  animation: orb-ring 1.4s ease-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .orb-core, .orb .orb-swirl, .orb .orb-ring { animation: none !important; }
+}
