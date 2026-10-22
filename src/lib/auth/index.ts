@@ -17,6 +17,23 @@ export function parentEmails(): string[] {
 
 const SIGN_IN_TTL = 60 * 15;
 
+/**
+ * Addresses the app is served from. Sign-in requests from any other site are rejected ("Invalid origin").
+ * On Vercel the app has several addresses (production, per-branch and per-deployment), so trust all of
+ * the ones Vercel reports for this project, plus BETTER_AUTH_URL and any extras in TRUSTED_ORIGINS.
+ */
+export function appOrigins(env: Record<string, string | undefined> = process.env): string[] {
+  const https = (host?: string) => (host ? `https://${host.replace(/^https?:\/\//, "").replace(/\/+$/, "")}` : undefined);
+  const list = [
+    env.BETTER_AUTH_URL?.trim().replace(/\/+$/, ""),
+    https(env.VERCEL_PROJECT_PRODUCTION_URL),
+    https(env.VERCEL_BRANCH_URL),
+    https(env.VERCEL_URL),
+    ...(env.TRUSTED_ORIGINS ?? "").split(",").map((o) => o.trim().replace(/\/+$/, "")),
+  ];
+  return [...new Set(list.filter((o): o is string => !!o))];
+}
+
 function signInEmail(link: string | null, code: string) {
   const color = "#4338ca";
   const button = link
@@ -41,6 +58,9 @@ ${button}
 
 export const auth = betterAuth({
   appName: APP_NAME,
+  // Links in sign-in emails use this address. Defaults to the production Vercel address if BETTER_AUTH_URL isn't set.
+  baseURL: appOrigins()[0],
+  trustedOrigins: appOrigins(),
   database: drizzleAdapter(db, { provider: "pg", schema }),
   // Kids sign in with username + PIN. Nobody can sign up: parents are listed in PARENT_EMAILS, and parents create kids.
   emailAndPassword: { enabled: true, disableSignUp: true, minPasswordLength: 4 },
