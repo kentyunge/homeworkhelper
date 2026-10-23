@@ -227,6 +227,36 @@ class Watcher:
 # ---------------------------------------------------------------- main loop
 
 
+def camera_problem(error):
+    """A plain-language reason the camera couldn't be used, shown on the station's screen."""
+    text = str(error)
+    if isinstance(error, ModuleNotFoundError) and "picamera2" in text:
+        return "The camera software isn't installed. On the Pi, run: sudo apt install -y python3-picamera2"
+    if isinstance(error, IndexError) or "list index out of range" in text or "no cameras" in text.lower():
+        return "No camera found. Check the camera's ribbon cable at both ends."
+    if "busy" in text.lower() or "in use" in text.lower():
+        return "The camera is in use by another program (like the focus helper). Restart the station."
+    return f"The camera isn't working: {text[:200]}"
+
+
+class Backoff:
+    """Waits longer after each failure in a row (6 s, 12 s, 24 s... up to a minute), so errors don't pile up."""
+
+    def __init__(self, first=6.0, most=60.0):
+        self.first, self.most, self.wait, self.until = first, most, 0.0, 0.0
+
+    def ready(self, now):
+        return now >= self.until
+
+    def failed(self, now):
+        self.wait = min(self.most, max(self.first, self.wait * 2))
+        self.until = now + self.wait
+        return self.wait
+
+    def succeeded(self):
+        self.wait, self.until = 0.0, 0.0
+
+
 def run(source):
     if not APP_URL:
         raise SystemExit("APP_URL isn't set. Run the installer, or put APP_URL=https://... in ~/.homework-station/station.env")
@@ -239,38 +269,68 @@ def run(source):
             log("Can't reach the app yet:", e)
             time.sleep(10)
 
-    camera = open_camera(source)
+    def report_camera(problem):
+        try:
+            api.request("POST", "/api/v1/station/status", {"cameraError": problem})
+        except Exception as e:
+            log("Couldn't report camera status:", e)
+
+    def open_with_retries():
+        while True:
+            try:
+                cam = open_camera(source)
+                report_camera(None)
+                return cam
+            except Exception as e:
+                problem = camera_problem(e)
+                log(problem)
+                report_camera(problem)
+                time.sleep(30)
+
+    camera = open_with_retries()
     watcher = Watcher()
+    sending = Backoff()
+    polling = Backoff(first=5.0)
     state = {"approved": False, "watching": False, "captureRequested": False}
     next_poll = 0.0
     log("Station running. App:", APP_URL)
 
     while True:
         now = time.time()
-        view = camera.gray()
+        try:
+            view = camera.gray()
+        except Exception as e:
+            problem = camera_problem(e)
+            log(problem)
+            report_camera(problem)
+            time.sleep(5)
+            camera = open_with_retries()
+            continue
         watcher.look(view, now)
 
         # Ask the app what to do only when someone's at the desk (or pairing), so an empty kitchen costs nothing.
         awake = now - watcher.last_motion < AWAKE_AFTER_MOTION_S or state["watching"]
         interval = POLL_PAIRING_S if not state["approved"] else POLL_ACTIVE_S
-        if (awake or not state["approved"]) and now >= next_poll:
+        if (awake or not state["approved"]) and now >= next_poll and polling.ready(now):
             next_poll = now + interval
             try:
                 new_state = api.request("GET", "/api/v1/station/camera")
+                polling.succeeded()
                 if new_state.get("watching") and not state["watching"]:
                     log("Watching started")
                     watcher.reset()
+                    sending.succeeded()
                 if state["watching"] and not new_state.get("watching"):
                     log("Watching stopped")
                 state = new_state
             except Exception as e:
-                log("Couldn't check in:", e)
-                if "401" in str(e):
+                log(f"Couldn't check in (trying again in {polling.failed(now):.0f}s):", e)
+                if "-> 401" in str(e):
                     log("This station isn't paired anymore. Getting a new pairing code.")
                     TOKEN_FILE.unlink(missing_ok=True)
                     api.token = ensure_token(api)
 
-        if state.get("watching"):
+        if state.get("watching") and sending.ready(now):
             requested = bool(state.get("captureRequested"))
             if watcher.should_send(view, now, requested):
                 try:
@@ -278,11 +338,13 @@ def run(source):
                     path = "/api/v1/station/frames" + ("?requested=1" if requested else "")
                     result = api.request("POST", path, data, "image/jpeg", timeout=120)
                     log("Sent photo:", result)
+                    sending.succeeded()
                     if result.get("status") != "busy":
                         watcher.sent(camera.gray(), time.time())
                     state["captureRequested"] = False
                 except Exception as e:
-                    log("Couldn't send photo:", e)
+                    # The app explains the problem on the station's screen; wait before trying again.
+                    log(f"Couldn't send photo (trying again in {sending.failed(time.time()):.0f}s):", e)
                     watcher.last_upload = time.time()
 
         time.sleep(STEP_S)

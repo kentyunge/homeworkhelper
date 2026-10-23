@@ -262,6 +262,35 @@ describe("watching the page", () => {
   });
 });
 
+describe("problems", () => {
+  it("explains a failed read on the station's screen, keeps no photo, and clears it once reading works", async () => {
+    const { token } = await watching();
+    const { uploads } = await import("@/db/schema");
+    const before = (await db.select({ id: uploads.id }).from(uploads)).length;
+    eng.readPage = async () => {
+      throw new tutor.TutorError("The Anthropic API key isn't tied to a workspace.");
+    };
+    await expect(desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).rejects.toThrow(/workspace/);
+    expect((await db.select({ id: uploads.id }).from(uploads)).length).toBe(before);
+    expect((await desk.stationState(await station(token))).problems).toEqual({ camera: null, tutor: "The Anthropic API key isn't tied to a workspace." });
+    const mine = (await station(token)).id;
+    expect((await desk.listStations()).find((s) => s.id === mine)?.problems.tutor).toMatch(/workspace/);
+
+    eng.readPage = DeskEngine.prototype.readPage.bind(eng);
+    eng.pages.push({ lines: [line("a=1")] });
+    await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    expect((await desk.stationState(await station(token))).problems.tutor).toBeNull();
+  });
+
+  it("shows camera problems reported by the Pi until it says the camera works", async () => {
+    const token = await pairedStation();
+    await desk.reportCamera(await station(token), "No camera found. Check the camera's ribbon cable at both ends.");
+    expect((await desk.stationState(await station(token))).problems.camera).toMatch(/ribbon cable/);
+    await desk.reportCamera(await station(token), null);
+    expect((await desk.stationState(await station(token))).problems.camera).toBeNull();
+  });
+});
+
 describe("helpers", () => {
   it("spots a turned page", () => {
     expect(desk.isNewPage([line("a=1")], [line("a = 1"), line("b=2")])).toBe(false);

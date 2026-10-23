@@ -15,6 +15,13 @@
       "when": 1792713946741,
       "tag": "0001_desk_station",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792719614182,
+      "tag": "0002_station_problems",
+      "breakpoints": true
     }
   ]
 }

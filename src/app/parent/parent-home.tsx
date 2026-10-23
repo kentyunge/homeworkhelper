@@ -73,6 +73,8 @@ export function ParentHome() {
 
       <DeskStations />
 
+      <ConnectionCheck />
+
       {usage && !usage.demo && (
         <p className="text-muted-foreground text-sm">
           Claude usage this month: about <span className="text-foreground font-medium">${usage.monthToDateUsd.toFixed(2)}</span>. Set a hard
@@ -155,5 +157,29 @@ function AddKid({ open, onOpenChange, onAdded }: { open: boolean; onOpenChange: 
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Makes a tiny request to Claude and explains any problem with the API key or account. */
+function ConnectionCheck() {
+  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function check() {
+    setBusy(true);
+    try {
+      setResult(await api<{ ok: boolean; message: string }>("/usage/check", { body: {} }));
+    } catch (e) {
+      setResult({ ok: false, message: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-3 text-sm">
+      <Button variant="secondary" size="sm" onClick={check} disabled={busy}>
+        {busy ? "Checking…" : "Check Claude connection"}
+      </Button>
+      {result && <span className={result.ok ? "text-ok" : "text-destructive"}>{result.message}</span>}
+    </div>
   );
 }
