@@ -68,6 +68,11 @@ const WorkReviewBlock = z.object({
         math: z.string().describe("The student's line as LaTeX, without $ delimiters"),
         status: z.enum(["ok", "look_here", "not_checked"]).describe("look_here only on the FIRST line that went wrong; later lines not_checked"),
         note: z.string().describe("Short note; for look_here, a question that points at the issue without fixing it. May be empty."),
+        pageLine: z
+          .number()
+          .int()
+          .nullable()
+          .describe("For desk camera work: the line number from the desk camera update this line refers to. Otherwise null."),
       }),
     )
     .describe("The student's written work, line by line, as you read it from their photo or text"),
@@ -87,7 +92,7 @@ export const TutorReplySchema = z.object({
   say: z
     .string()
     .describe(
-      "Spoken aloud in your voice. 1-3 short, natural sentences. No symbols, equations, or LaTeX: talk about the idea and point to the screen ('look at step two').",
+      "Spoken aloud in your voice. 1-3 short, natural sentences. No symbols, equations, or LaTeX: talk about the idea and point to the screen ('look at step two'). Empty string only for a desk camera update where staying quiet is best.",
     ),
   show: z.array(Block).describe("What appears on screen under what you say. May be empty for quick back-and-forth."),
   hintLevel: z

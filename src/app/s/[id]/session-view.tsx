@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, ArrowUp, Camera, Check, Flag, Mic, Paperclip, RotateCw, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowLeft, ArrowUp, Camera, Check, Flag, Mic, Paperclip, RotateCw, ScanLine, Volume2, VolumeX, X } from "lucide-react";
 import { toast } from "sonner";
 import { TutorBlocks } from "@/components/tutor/blocks";
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
 type Turn = {
   id: number;
   role: "kid" | "tutor";
-  kid: { text: string; uploadIds: number[] } | null;
+  kid: { text: string; uploadIds: number[]; source?: "desk"; snapshotId?: number } | null;
   reply: TutorReply | null;
   createdAt: string;
 };
@@ -32,7 +32,9 @@ type SessionData = {
   flagResolvedAt: string | null;
   turns: Turn[];
   awaitingReply: boolean;
+  deskStation: { id: number; name: string; live: boolean } | null;
 };
+type StationOption = { id: number; name: string; watchingThis: boolean; busy: boolean };
 
 const QUICK = ["I'm stuck", "Give me a hint", "Can you check my work?", "Explain it a different way"];
 const VOICE_KEY = "voice-on";
@@ -69,6 +71,8 @@ export function SessionView(props: {
   const [voiceOn, setVoiceOn] = useState(false);
   const [flagOpen, setFlagOpen] = useState(false);
   const [flagNote, setFlagNote] = useState("");
+  const [deskOpen, setDeskOpen] = useState(false);
+  const [stationOptions, setStationOptions] = useState<StationOption[] | null>(null);
   const speaker = useSpeaker(props.voiceProvider, props.voiceId);
   const listener = useListener();
   const bottom = useRef<HTMLDivElement>(null);
@@ -119,7 +123,8 @@ export function SessionView(props: {
       setPendingUploads([]);
       try {
         const t = await api<Turn>(`/sessions/${id}/turns`, { body: { text: message, uploadIds } });
-        if (voiceOn && t.reply) speaker.speak(t.reply.say);
+        // When the desk station's screen is on, it does the talking.
+        if (voiceOn && t.reply && !data?.deskStation?.live) speaker.speak(t.reply.say);
       } catch (e) {
         toast.error((e as Error).message);
       } finally {
@@ -127,7 +132,7 @@ export function SessionView(props: {
         load();
       }
     },
-    [id, load, speaker, voiceOn],
+    [id, load, speaker, voiceOn, data?.deskStation?.live],
   );
 
   // Arriving from "Snap a photo" on the home screen: send that photo straight away.
@@ -231,6 +236,36 @@ export function SessionView(props: {
     }
   }
 
+  async function openDesk() {
+    setDeskOpen(true);
+    setStationOptions(null);
+    try {
+      setStationOptions(await api<StationOption[]>(`/sessions/${id}/desk`));
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  async function chooseStation(stationId: number) {
+    try {
+      await api(`/sessions/${id}/desk`, { body: { stationId } });
+      setDeskOpen(false);
+      toast.success("Desk camera on. If the station's screen is dark, tap it to wake it.");
+      load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  async function stopDesk() {
+    try {
+      await api(`/sessions/${id}/desk`, { method: "DELETE" });
+      load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
   async function resolve(resolved: boolean) {
     try {
       await api(`/sessions/${id}/resolve`, { body: { resolved } });
@@ -266,6 +301,12 @@ export function SessionView(props: {
             <span className="hidden sm:inline">Voice {voiceOn ? "on" : "off"}</span>
           </Button>
         )}
+        {!readOnly && !data?.deskStation && (
+          <Button variant="ghost" size="sm" onClick={openDesk} aria-label="Desk camera" title="Watch my paper with the desk camera">
+            <ScanLine />
+            <span className="hidden sm:inline">Desk camera</span>
+          </Button>
+        )}
         {!readOnly && !flagged && (
           <Button variant="ghost" size="sm" onClick={() => setFlagOpen(true)} aria-label="Flag for a parent" title="Save this to go over with a parent">
             <Flag />
@@ -283,6 +324,17 @@ export function SessionView(props: {
         <p className="border-warn/40 bg-warn/10 text-warn mx-3 mt-3 rounded-lg border px-3 py-2 text-xs">
           Demo mode: replies are canned examples until an Anthropic API key is added.
         </p>
+      )}
+      {data?.deskStation && (
+        <div className="border-primary/40 bg-primary/10 mx-3 mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm">
+          <ScanLine className="text-primary size-4 shrink-0" />
+          <span className="flex-1">
+            {data.deskStation.name} is watching {readOnly ? "the" : "your"} page. Write each step on its own line.
+          </span>
+          <Button variant="ghost" size="sm" onClick={stopDesk}>
+            Stop
+          </Button>
+        </div>
       )}
       {flagged && (
         <p className="border-warn/40 bg-warn/10 text-warn mx-3 mt-3 rounded-lg border px-3 py-2 text-sm">
@@ -433,6 +485,28 @@ export function SessionView(props: {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <Dialog open={deskOpen} onOpenChange={setDeskOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Use the desk camera</DialogTitle>
+            <DialogDescription>Work on paper under the camera. {assistantName} checks each line as you write it.</DialogDescription>
+          </DialogHeader>
+          {stationOptions === null ? (
+            <p className="text-muted-foreground text-sm">Loading…</p>
+          ) : stationOptions.length === 0 ? (
+            <p className="text-muted-foreground text-sm">No desk stations are set up yet. A parent can add one from the parent page.</p>
+          ) : (
+            <div className="space-y-2">
+              {stationOptions.map((s) => (
+                <Button key={s.id} variant="secondary" className="w-full justify-start" onClick={() => chooseStation(s.id)}>
+                  <ScanLine /> {s.name}
+                  {s.busy && <span className="text-muted-foreground ml-auto text-xs">in use</span>}
+                </Button>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -451,6 +525,21 @@ function Thumb({ id }: { id: number }) {
 
 function KidBubble({ turn }: { turn: Turn }) {
   const k = turn.kid!;
+  if (k.source === "desk") {
+    const asked = k.text.includes("tapped Check now");
+    return (
+      <div className="flex items-center justify-end gap-2">
+        <span className="text-muted-foreground text-xs">{asked ? "Asked for a check" : "New work on your page"}</span>
+        {k.snapshotId ? (
+          <a href={`/api/v1/uploads/${k.snapshotId}`} target="_blank" rel="noreferrer" title="See the photo">
+            <Thumb id={k.snapshotId} />
+          </a>
+        ) : (
+          <ScanLine className="text-muted-foreground size-4" />
+        )}
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col items-end gap-2">
       {k.uploadIds.length > 0 && (
@@ -474,9 +563,9 @@ function TutorTurn({ reply, name, onReplay }: { reply: TutorReply; name: string;
         <span className="orb-core mt-1 inline-block size-6 shrink-0 rounded-full" aria-hidden />
         <div className="min-w-0 flex-1">
           <p className="text-muted-foreground text-xs font-semibold">{name}</p>
-          <p className="text-[1.05rem] leading-relaxed">{reply.say}</p>
+          {reply.say && <p className="text-[1.05rem] leading-relaxed">{reply.say}</p>}
         </div>
-        {onReplay && (
+        {onReplay && reply.say && (
           <Button variant="ghost" size="icon" className="size-8" onClick={onReplay} aria-label="Say it again" title="Say it again">
             <Volume2 className="size-4" />
           </Button>

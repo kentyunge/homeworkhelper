@@ -60,13 +60,32 @@ export const tutorSessions = pgTable(
     flaggedAt: timestamp("flagged_at", { withTimezone: true }),
     flagNote: text("flag_note"),
     flagResolvedAt: timestamp("flag_resolved_at", { withTimezone: true }),
+    desk: jsonb("desk").$type<DeskState>(),
     ...timestamps,
   },
   (t) => [index("tutor_sessions_kid_idx").on(t.kidId, t.lastActivityAt)],
 );
 
-/** What the kid sent: text and/or uploads. Uploads are referenced by id and inlined when calling Claude. */
-export type KidContent = { text: string; uploadIds: number[] };
+/**
+ * What the kid sent: text and/or uploads. Uploads are referenced by id and inlined when calling Claude.
+ * Desk camera updates are sent as text (the lines read from the page); `snapshotId` is the photo they
+ * were read from, shown in the app but not sent to the tutor.
+ */
+export type KidContent = { text: string; uploadIds: number[]; source?: "desk"; snapshotId?: number };
+
+/** One line of handwriting read from the desk camera. Positions are fractions of the photo (0-1). */
+export type PageLine = { latex: string; handwritten: boolean; y: number; x0: number; x1: number };
+export type LineMark = { latex: string; status: "ok" | "look_here" | "not_checked"; note: string };
+
+/** What the desk camera has seen in a session, and what the tutor has said about it. */
+export type DeskState = {
+  lines: PageLine[];
+  /** Tutor's marks, by line index. Lines past the end haven't been checked yet. */
+  marks: LineMark[];
+  snapshotId: number | null;
+  unreadable: string | null;
+  lastTutorAt: string | null;
+};
 
 /** Usage numbers for one Claude call (for cost tracking). */
 export type TurnUsage = { model: string; input: number; output: number; cacheRead: number; cacheWrite: number };
@@ -102,5 +121,32 @@ export const uploads = pgTable("uploads", {
   mediaType: text("media_type").notNull(),
   bytes: integer("bytes").notNull(),
   data: bytea("data").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * A desk station: a Raspberry Pi with a camera above the desk and a small touchscreen. It signs in with
+ * its own token (never a kid's login), shown once as a pairing code that a parent approves.
+ */
+export const stations = pgTable("stations", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull().default("Desk station"),
+  tokenHash: text("token_hash").notNull().unique(),
+  /** Shown on the station's screen until a parent approves it. */
+  pairCode: text("pair_code"),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  activeSessionId: integer("active_session_id").references(() => tutorSessions.id, { onDelete: "set null" }),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  paused: boolean("paused").notNull().default(false),
+  /** "Check now" was pressed: the camera should send a photo right away. */
+  captureRequested: boolean("capture_requested").notNull().default(false),
+  /** Set while a photo is being read or the tutor is replying, so only one runs at a time. */
+  busySince: timestamp("busy_since", { withTimezone: true }),
+  /** Last time new writing appeared. Drives the "want a hint?" nudge and the idle stop. */
+  lastChangeAt: timestamp("last_change_at", { withTimezone: true }),
+  nudgedAt: timestamp("nudged_at", { withTimezone: true }),
+  pinFailures: integer("pin_failures").notNull().default(0),
+  pinLockedUntil: timestamp("pin_locked_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

@@ -1,7 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { kids, tutorSessions, turns, type KidContent, type TurnUsage } from "@/db/schema";
+import { kids, stations, tutorSessions, turns, type KidContent, type TurnUsage } from "@/db/schema";
 import type { TutorReply } from "@/lib/tutor-reply";
 import { badRequest, notFound } from "../errors";
 import { assertKidOwnsUploads, IMAGE_TYPES, loadUploads } from "../uploads";
@@ -74,7 +74,13 @@ export async function getSession(id: number) {
   const [s] = await db.select().from(tutorSessions).where(eq(tutorSessions.id, id));
   if (!s) throw notFound("That conversation doesn't exist");
   const rows = await db.select().from(turns).where(eq(turns.sessionId, id)).orderBy(asc(turns.id));
+  const [station] = await db
+    .select({ id: stations.id, name: stations.name, lastSeenAt: stations.lastSeenAt })
+    .from(stations)
+    .where(eq(stations.activeSessionId, id));
   return {
+    /** The desk station watching this conversation, if any. `live` = its screen is on, so it does the talking. */
+    deskStation: station ? { id: station.id, name: station.name, live: !!station.lastSeenAt && Date.now() - station.lastSeenAt.getTime() < 45_000 } : null,
     id: s.id,
     kidId: s.kidId,
     title: s.title,
@@ -82,6 +88,7 @@ export async function getSession(id: number) {
     flaggedAt: s.flaggedAt,
     flagNote: s.flagNote,
     flagResolvedAt: s.flagResolvedAt,
+    desk: s.desk,
     turns: rows.map((t) => ({ id: t.id, role: t.role, kid: t.kid, reply: t.reply, createdAt: t.createdAt })),
     /** True when the last thing in the conversation is the kid's (e.g. the reply failed): offer a retry. */
     awaitingReply: rows.length > 0 && rows[rows.length - 1].role === "kid",
@@ -151,8 +158,17 @@ async function guardContext(rows: TurnRow[]): Promise<Msg[]> {
 
 // ---------- a turn ----------
 
-export async function sendKidTurn(sessionId: number, kidId: number, input: { text?: string; uploadIds?: number[] }) {
-  const content: KidContent = { text: (input.text ?? "").slice(0, 8000), uploadIds: input.uploadIds ?? [] };
+export async function sendKidTurn(
+  sessionId: number,
+  kidId: number,
+  input: { text?: string; uploadIds?: number[]; source?: "desk"; snapshotId?: number },
+) {
+  const content: KidContent = {
+    text: (input.text ?? "").slice(0, 8000),
+    uploadIds: input.uploadIds ?? [],
+    ...(input.source ? { source: input.source } : {}),
+    ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
+  };
   if (!content.text.trim() && content.uploadIds.length === 0) throw badRequest("Type something or add a photo");
   if (content.uploadIds.length > 5) throw badRequest("Up to 5 files at a time");
   await assertKidOwnsUploads(kidId, content.uploadIds);

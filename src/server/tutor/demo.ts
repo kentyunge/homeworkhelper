@@ -1,5 +1,33 @@
+import type Anthropic from "@anthropic-ai/sdk";
+import type { PageLine } from "@/db/schema";
 import type { TutorReply } from "@/lib/tutor-reply";
-import type { TutorEngine, TutorResult } from "./engine";
+import type { PageReading, TutorEngine, TutorResult } from "./engine";
+
+/** The page the demo "camera" sees, one more line each photo: a printed problem, then the student's work. */
+const DEMO_PAGE: PageLine[] = [
+  { latex: "3(x-4)=2x+5", handwritten: false, y: 0.14, x0: 0.12, x1: 0.48 },
+  { latex: "3x-12=2x+5", handwritten: true, y: 0.3, x0: 0.14, x1: 0.5 },
+  { latex: "x-12=5", handwritten: true, y: 0.44, x0: 0.18, x1: 0.42 },
+  { latex: "x=-7", handwritten: true, y: 0.58, x0: 0.2, x1: 0.36 },
+];
+
+/** A reply to a "[Desk camera]" update: checks each NEW line, and only speaks up about a mistake. */
+function deskReply(text: string): TutorReply {
+  const fresh = [...text.matchAll(/^(\d+)\. NEW: \$(.*)\$$/gm)].map((m) => ({ n: Number(m[1]), latex: m[2] }));
+  const wrong = fresh.find((l) => l.latex.replace(/\s/g, "") === "x=-7");
+  const lines = fresh.map((l) => ({
+    math: l.latex,
+    status: (wrong && l.n > wrong.n ? "not_checked" : l === wrong ? "look_here" : "ok") as "ok" | "look_here" | "not_checked",
+    note: l === wrong ? "When the 12 moves to the other side, what happens to its sign?" : "",
+    pageLine: l.n,
+  }));
+  return {
+    say: wrong ? `Hold on. Take another look at line ${wrong.n}. What happens to the twelve when it moves sides?` : "",
+    show: lines.length ? [{ type: "workReview", lines }] : [],
+    hintLevel: wrong ? 1 : 0,
+    title: null,
+  };
+}
 
 /**
  * Canned replies used when ANTHROPIC_API_KEY isn't set, so the app can be clicked through
@@ -107,10 +135,10 @@ const SCRIPT: TutorReply[] = [
       {
         type: "workReview",
         lines: [
-          { math: "3(x - 4) = 2x + 5", status: "ok", note: "" },
-          { math: "3x - 12 = 2x + 5", status: "ok", note: "Nice distributing." },
-          { math: "x - 12 = 5 \\Rightarrow x = -7", status: "look_here", note: "When you move the 12 to the other side, what happens to its sign?" },
-          { math: "\\text{check: } 3(-11) = -9", status: "not_checked", note: "" },
+          { math: "3(x - 4) = 2x + 5", status: "ok", note: "", pageLine: null },
+          { math: "3x - 12 = 2x + 5", status: "ok", note: "Nice distributing.", pageLine: null },
+          { math: "x - 12 = 5 \\Rightarrow x = -7", status: "look_here", note: "When you move the 12 to the other side, what happens to its sign?", pageLine: null },
+          { math: "\\text{check: } 3(-11) = -9", status: "not_checked", note: "", pageLine: null },
         ],
       },
     ],
@@ -120,9 +148,11 @@ const SCRIPT: TutorReply[] = [
 export class DemoEngine implements TutorEngine {
   readonly demo = true;
 
-  async reply(_system: string, messages: { role: string }[]): Promise<TutorResult> {
+  async reply(_system: string, messages: Anthropic.Beta.BetaMessageParam[]): Promise<TutorResult> {
     const tutorTurns = messages.filter((m) => m.role === "assistant").length;
-    const reply = SCRIPT[tutorTurns % SCRIPT.length];
+    const last = messages[messages.length - 1];
+    const lastText = typeof last?.content === "string" ? last.content : (last?.content ?? []).map((b) => (b.type === "text" ? b.text : "")).join("\n");
+    const reply = lastText.startsWith("[Desk camera]") ? deskReply(lastText) : SCRIPT[tutorTurns % SCRIPT.length];
     await new Promise((r) => setTimeout(r, 600)); // feel like a real reply
     return {
       reply,
@@ -133,5 +163,10 @@ export class DemoEngine implements TutorEngine {
 
   async revealsAnswer() {
     return { revealed: false, usage: null };
+  }
+
+  async readPage(_image: Buffer, _type: string, previous: PageLine[]): Promise<PageReading> {
+    await new Promise((r) => setTimeout(r, 300));
+    return { lines: DEMO_PAGE.slice(0, Math.min(DEMO_PAGE.length, previous.length + 1)), unreadable: null, usage: null };
   }
 }

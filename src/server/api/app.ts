@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { getActor, canSeeSession, requireActor, requireKid, requireParent, type Actor } from "../access";
 import { HttpError, badRequest, notFound } from "../errors";
+import * as desk from "../desk";
 import * as family from "../family";
 import * as tutor from "../tutor";
 import { getUpload, saveUpload } from "../uploads";
@@ -184,4 +185,120 @@ api.post("/tts", async (c) => {
   const { text } = await body(c, z.object({ text: z.string().max(1000) }));
   const kid = await family.getKid(a.kidId);
   return elevenLabsSpeech(text, kid.voiceId);
+});
+
+// ---------- desk stations: parent management ----------
+
+api.get("/stations", async (c) => {
+  requireParent(c.get("actor"));
+  return c.json(await desk.listStations());
+});
+
+api.post("/stations/approve", async (c) => {
+  requireParent(c.get("actor"));
+  const { code, name } = await body(c, z.object({ code: z.string().min(4).max(20), name: z.string().max(40).default("Desk station") }));
+  return c.json(await desk.approveStation(code, name));
+});
+
+api.patch("/stations/:id", async (c) => {
+  requireParent(c.get("actor"));
+  const { name } = await body(c, z.object({ name: z.string().max(40) }));
+  return c.json(await desk.renameStation(id(c), name));
+});
+
+api.delete("/stations/:id", async (c) => {
+  requireParent(c.get("actor"));
+  await desk.removeStation(id(c));
+  return c.json({ ok: true });
+});
+
+// ---------- desk stations: from a conversation ----------
+
+api.get("/sessions/:id/desk", async (c) => {
+  const a = requireActor(c.get("actor"));
+  await canSeeSession(a, id(c));
+  return c.json(await desk.stationsForSession(id(c)));
+});
+
+api.post("/sessions/:id/desk", async (c) => {
+  const a = requireKid(c.get("actor"));
+  await canSeeSession(a, id(c));
+  const { stationId } = await body(c, z.object({ stationId: z.number().int().positive() }));
+  await desk.attachFromApp(stationId, id(c));
+  return c.json({ ok: true });
+});
+
+api.delete("/sessions/:id/desk", async (c) => {
+  const a = requireActor(c.get("actor"));
+  await canSeeSession(a, id(c));
+  await desk.stopForSession(id(c));
+  return c.json({ ok: true });
+});
+
+// ---------- desk stations: the station itself (signs in with its own token) ----------
+
+/** A new station asks for a pairing code. No sign-in: the code does nothing until a parent approves it. */
+api.post("/stations/pair", async (c) => c.json(await desk.requestPairing(), 201));
+
+const stationOf = (c: Context) => desk.stationForToken(c.req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? null);
+
+api.get("/station/camera", async (c) => c.json(desk.cameraState(await stationOf(c))));
+
+api.get("/station/state", async (c) => c.json(await desk.stationState(await stationOf(c))));
+
+api.post("/station/tick", async (c) => {
+  const s = await stationOf(c);
+  const t = await desk.tick(s);
+  return c.json({ ...(await desk.stationState(await stationOf(c))), nudge: t.nudge });
+});
+
+api.post("/station/start", async (c) => {
+  const s = await stationOf(c);
+  const { kidId, pin } = await body(c, z.object({ kidId: z.number().int().positive(), pin: z.string().max(8) }));
+  return c.json(await desk.startAtStation(s, kidId, pin));
+});
+
+api.post("/station/stop", async (c) => {
+  const s = await stationOf(c);
+  await desk.stopWatching(s.id);
+  return c.json({ ok: true });
+});
+
+api.post("/station/pause", async (c) => {
+  const s = await stationOf(c);
+  const { paused } = await body(c, z.object({ paused: z.boolean() }));
+  await desk.setPaused(s, paused);
+  return c.json({ ok: true });
+});
+
+api.post("/station/check", async (c) => {
+  await desk.requestCheck(await stationOf(c));
+  return c.json({ ok: true });
+});
+
+api.post("/station/hint", async (c) => c.json(await desk.hint(await stationOf(c))));
+
+api.post("/station/flag", async (c) => {
+  await desk.flagFromStation(await stationOf(c));
+  return c.json({ ok: true });
+});
+
+api.post("/station/frames", async (c) => {
+  const s = await stationOf(c);
+  const type = (c.req.header("content-type") ?? "").split(";")[0].trim();
+  const data = Buffer.from(await c.req.arrayBuffer());
+  return c.json(await desk.handleFrame(s, data, type, c.req.query("requested") === "1"));
+});
+
+api.get("/station/snapshots/:id", async (c) => {
+  const u = await desk.snapshotForStation(await stationOf(c), id(c));
+  return new Response(new Uint8Array(u.data), { headers: { "content-type": u.mediaType, "cache-control": "private, max-age=3600" } });
+});
+
+api.post("/station/tts", async (c) => {
+  const s = await stationOf(c);
+  const { text } = await body(c, z.object({ text: z.string().max(1000) }));
+  const st = await desk.stationState(s);
+  if (!st.active) throw badRequest("Nothing is being watched");
+  return elevenLabsSpeech(text, st.active.kid.voiceId);
 });
