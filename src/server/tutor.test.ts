@@ -37,6 +37,9 @@ class FakeEngine implements TutorEngine {
   async revealsAnswer() {
     return { revealed: this.reveals.shift() ?? false, usage: { model: "claude-haiku-5-5", input: 500, output: 20, cacheRead: 0, cacheWrite: 0 } };
   }
+  async readPage() {
+    return { lines: [], unreadable: null, usage: null };
+  }
 }
 
 let fake: FakeEngine;
@@ -117,7 +120,7 @@ describe("sessions", () => {
   it("keeps the kid's message when the reply fails, so they can retry", async () => {
     const k = await newKid();
     const s = await tutor.startSession(k.id);
-    const failing: TutorEngine = { demo: false, reply: () => Promise.reject(new tutor.TutorError("down")), revealsAnswer: fake.revealsAnswer };
+    const failing: TutorEngine = { demo: false, reply: () => Promise.reject(new tutor.TutorError("down")), revealsAnswer: fake.revealsAnswer, readPage: fake.readPage };
     tutor.setEngine(failing);
     await expect(tutor.sendKidTurn(s.id, k.id, { text: "hello?" })).rejects.toThrow("down");
     expect((await tutor.getSession(s.id)).awaitingReply).toBe(true);

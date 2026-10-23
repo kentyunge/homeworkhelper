@@ -18,6 +18,10 @@ A voice-first study assistant for the kids. It guides their thinking with hints,
 - **Writing:** brainstorming bullets, questions, and high-level feedback only. It never writes sentences for them.
 - Photos are deleted after 30 days.
 
+## Desk station (optional)
+
+A Raspberry Pi with a camera above the desk and a small touchscreen. Kids tap their name, enter their PIN, and work on paper. A low-cost model reads each new line from the photo, the tutor checks new lines (at most every 12 seconds while writing continues), and the screen shows the page with a ✓ beside lines that are right and a ? on the first one to look at again. The same conversation shows on the Chromebook. Setup guide: [pi/README.md](pi/README.md). The installer is served by the app at `/pi/install`.
+
 ## Stack
 
 Same setup as Woodside Wednesday.
@@ -55,6 +59,7 @@ Without `ANTHROPIC_API_KEY` the tutor runs in **demo mode**: canned replies that
 |---|---|
 | `npm run dev` | Dev server |
 | `npm test` | Service tests (in-memory Postgres, fake Claude) |
+| `python3 -m unittest discover tests/pi` | Desk station camera logic |
 | `npm run typecheck` / `npm run lint` | Types / ESLint |
 | `npm run db:generate` | New migration after editing `src/db/schema.ts` |
 

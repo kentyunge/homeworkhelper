@@ -1,13 +1,21 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
-import type { TurnUsage } from "@/db/schema";
+import type { PageLine, TurnUsage } from "@/db/schema";
 import { TutorReplySchema, type TutorReply } from "@/lib/tutor-reply";
 
 type Msg = Anthropic.Beta.BetaMessageParam;
 
 export const TUTOR_MODEL = process.env.TUTOR_MODEL || "claude-opus-5-5";
 export const GUARD_MODEL = process.env.GUARD_MODEL || "claude-haiku-5-5";
+export const READER_MODEL = process.env.READER_MODEL || "claude-haiku-5-5";
+
+export interface PageReading {
+  lines: PageLine[];
+  /** Why the page couldn't be read (hand in the way, blurry, no paper), or null. */
+  unreadable: string | null;
+  usage: TurnUsage | null;
+}
 
 export class TutorError extends Error {}
 
@@ -24,6 +32,8 @@ export interface TutorEngine {
   reply(system: string, messages: Msg[]): Promise<TutorResult>;
   /** Does this draft give away the answer to the student's assigned problem? */
   revealsAnswer(context: Msg[], draft: TutorReply): Promise<{ revealed: boolean; usage: TurnUsage | null }>;
+  /** Read the handwriting in a desk camera photo, line by line. */
+  readPage(image: Buffer, mediaType: string, previous: PageLine[]): Promise<PageReading>;
 }
 
 function usageOf(model: string, u: Anthropic.Beta.BetaUsage): TurnUsage {
@@ -77,6 +87,30 @@ These are fine (revealsAnswer = false):
 - Confirming that an answer the student already stated themselves is right, or pointing at the step where their work went wrong.
 - Restating the problem.`;
 
+const ReadingSchema = z.object({
+  lines: z.array(
+    z.object({
+      latex: z.string().describe("The line as LaTeX, without $ delimiters. Copy exactly what is written, mistakes included."),
+      handwritten: z.boolean().describe("true for the student's writing, false for printed text (e.g. the worksheet's problem)"),
+      y: z.number().describe("Vertical center of the line, as a fraction of the image height (0 = top, 1 = bottom)"),
+      x0: z.number().describe("Left end of the line, as a fraction of the image width"),
+      x1: z.number().describe("Right end of the line, as a fraction of the image width"),
+    }),
+  ),
+  unreadable: z
+    .string()
+    .nullable()
+    .describe("If the work can't be read (a hand or arm covers it, it's blurry, there's no paper), a few words saying why. Otherwise null."),
+});
+
+const READER_SYSTEM = `You read a student's math work from a photo taken by a camera looking straight down at their desk.
+
+List every line of math on the paper, top to bottom, as LaTeX. Copy exactly what is written, including mistakes: never correct, finish, or tidy up the student's work. A line is one step of work (usually one equation or expression). Mark printed text (a worksheet's problems) as handwritten = false. Skip doodles, names, dates and crossed-out work.
+
+You'll also get the lines read from the previous photo. When a line is unchanged, return the same LaTeX character for character, so changes are easy to spot.
+
+If a hand, arm or pencil covers part of the work, or the photo is too blurry to read reliably, set unreadable and return the lines you can read.`;
+
 export class ClaudeEngine implements TutorEngine {
   readonly demo = false;
   private client = new Anthropic();
@@ -103,6 +137,41 @@ export class ClaudeEngine implements TutorEngine {
     if (response.stop_reason === "refusal") throw new TutorError("I couldn't help with that one. Try asking a different way, or flag it for a parent.");
     if (response.stop_reason === "max_tokens" || !response.parsed_output) throw new TutorError("My reply got cut off. Try again.");
     return { reply: response.parsed_output, content: echoContent(response.content), usage: usageOf(response.model, response.usage) };
+  }
+
+  async readPage(image: Buffer, mediaType: string, previous: PageLine[]): Promise<PageReading> {
+    let response;
+    try {
+      response = await this.client.beta.messages.parse({
+        model: READER_MODEL,
+        max_tokens: 8000,
+        output_config: { effort: "low", format: betaZodOutputFormat(ReadingSchema) },
+        system: READER_SYSTEM,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: mediaType as "image/jpeg", data: image.toString("base64") } },
+              {
+                type: "text",
+                text: previous.length
+                  ? `Lines read from the previous photo:\n${previous.map((l, i) => `${i + 1}. ${l.latex}`).join("\n")}`
+                  : "This is the first photo.",
+              },
+            ],
+          },
+        ],
+      });
+    } catch (error) {
+      apiError(error);
+    }
+    const out = response.parsed_output;
+    if (!out) return { lines: previous, unreadable: "Couldn't read the page", usage: usageOf(response.model, response.usage) };
+    const clamp = (n: number) => Math.min(1, Math.max(0, Number.isFinite(n) ? n : 0));
+    const lines = out.lines
+      .filter((l) => l.latex.trim())
+      .map((l) => ({ latex: l.latex.trim(), handwritten: l.handwritten, y: clamp(l.y), x0: clamp(l.x0), x1: clamp(l.x1) }));
+    return { lines, unreadable: out.unreadable, usage: usageOf(response.model, response.usage) };
   }
 
   async revealsAnswer(context: Msg[], draft: TutorReply) {

@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { DeskStations } from "./desk-stations";
 
 type KidRow = { id: number; name: string; grade: number; username: string; assistantName: string; openFlags: number };
 type Usage = { monthToDateUsd: number; demo: boolean; elevenLabs: boolean };
@@ -69,6 +70,8 @@ export function ParentHome() {
           ))}
         </ul>
       )}
+
+      <DeskStations />
 
       {usage && !usage.demo && (
         <p className="text-muted-foreground text-sm">

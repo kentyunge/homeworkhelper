@@ -3,7 +3,7 @@ import { Client } from "pg";
 import { db } from "../src/db";
 
 /** Tables this app creates. Anything else in the database means it belongs to a different app. */
-const OUR_TABLES = ["kids", "turns", "tutor_sessions", "uploads", "account", "session", "user", "verification"];
+const OUR_TABLES = ["kids", "turns", "tutor_sessions", "uploads", "stations", "account", "session", "user", "verification"];
 
 /** Where we're connecting, without the password: "host/database". */
 function describe(url: string) {
