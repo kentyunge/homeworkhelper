@@ -64,11 +64,44 @@ export function echoContent(content: Anthropic.Beta.BetaContentBlock[]): Anthrop
   return out;
 }
 
+/** A plain-language explanation of a Claude API error, for kids' screens and the parent page. */
+export function explainApiError(error: unknown): string | null {
+  if (error instanceof Anthropic.AuthenticationError) return "The Anthropic API key was rejected. Check ANTHROPIC_API_KEY in Vercel.";
+  if (error instanceof Anthropic.PermissionDeniedError) return "The Anthropic API key isn't allowed to use this model. Check the key's workspace in the Anthropic Console.";
+  if (error instanceof Anthropic.RateLimitError) return "Too many requests right now. Try again in a minute.";
+  if (error instanceof Anthropic.APIError) {
+    const msg = error.message ?? "";
+    if (msg.includes("anthropic-workspace-id") || msg.includes("not scoped to a workspace")) {
+      return "The Anthropic API key isn't tied to a workspace. In the Anthropic Console, create a key inside a workspace and put it in ANTHROPIC_API_KEY.";
+    }
+    if (/credit balance|billing|spend limit|usage limit/i.test(msg)) {
+      return "The Anthropic account is out of credit or hit its spending limit. Check Billing and Limits in the Anthropic Console.";
+    }
+    if ((error.status ?? 0) >= 500) return "Claude is having trouble right now. Try again in a minute.";
+    return `Claude API error ${error.status}: ${msg.slice(0, 300)}`;
+  }
+  return null;
+}
+
 function apiError(error: unknown): never {
-  if (error instanceof Anthropic.AuthenticationError) throw new TutorError("The Anthropic API key was rejected. Check ANTHROPIC_API_KEY.");
-  if (error instanceof Anthropic.RateLimitError) throw new TutorError("Too many requests right now. Try again in a minute.");
-  if (error instanceof Anthropic.APIError) throw new TutorError(`Claude API error ${error.status}: ${error.message}`);
+  const explained = explainApiError(error);
+  if (explained) throw new TutorError(explained);
   throw error;
+}
+
+/** A tiny request to confirm the API key works (for the parent page's "Check connection"). */
+export async function checkClaude(): Promise<{ ok: boolean; message: string }> {
+  if (!process.env.ANTHROPIC_API_KEY) return { ok: false, message: "ANTHROPIC_API_KEY isn't set, so the tutor is in demo mode." };
+  try {
+    await new Anthropic().messages.create({
+      model: READER_MODEL,
+      max_tokens: 16,
+      messages: [{ role: "user", content: "Reply with OK." }],
+    });
+    return { ok: true, message: "Connected to Claude." };
+  } catch (error) {
+    return { ok: false, message: explainApiError(error) ?? (error as Error).message };
+  }
 }
 
 const GuardSchema = z.object({

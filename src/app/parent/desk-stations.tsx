@@ -8,7 +8,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
 
-type Station = { id: number; name: string; lastSeenAt: string | null; inUseBy: string | null };
+type Station = {
+  id: number;
+  name: string;
+  lastSeenAt: string | null;
+  inUseBy: string | null;
+  problems: { camera: string | null; tutor: string | null };
+};
 
 function seen(iso: string | null) {
   if (!iso) return "never";
@@ -101,6 +107,9 @@ export function DeskStations() {
                     <span className="text-muted-foreground text-xs">
                       {s.inUseBy ? `In use by ${s.inUseBy}` : `Last checked in ${seen(s.lastSeenAt)}`}
                     </span>
+                    {(s.problems.camera || s.problems.tutor) && (
+                      <span className="text-destructive block text-xs">{s.problems.camera ?? s.problems.tutor}</span>
+                    )}
                   </span>
                   <Button
                     size="icon"

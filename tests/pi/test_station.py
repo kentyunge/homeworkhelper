@@ -79,5 +79,21 @@ class WatcherTest(unittest.TestCase):
         self.assertGreater(station.sharpness(crisp), station.sharpness(blurry) * 3)
 
 
+class ProblemsTest(unittest.TestCase):
+    def test_backoff_doubles_up_to_a_minute_and_resets(self):
+        b = station.Backoff()
+        self.assertTrue(b.ready(0))
+        self.assertEqual([b.failed(0) for _ in range(6)], [6, 12, 24, 48, 60, 60])
+        self.assertFalse(b.ready(59))
+        self.assertTrue(b.ready(60))
+        b.succeeded()
+        self.assertTrue(b.ready(0))
+
+    def test_camera_problems_are_explained(self):
+        self.assertIn("apt install -y python3-picamera2", station.camera_problem(ModuleNotFoundError("No module named 'picamera2'")))
+        self.assertIn("ribbon cable", station.camera_problem(IndexError("list index out of range")))
+        self.assertIn("isn't working", station.camera_problem(RuntimeError("weird")))
+
+
 if __name__ == "__main__":
     unittest.main()

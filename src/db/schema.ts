@@ -146,6 +146,11 @@ export const stations = pgTable("stations", {
   /** Last time new writing appeared. Drives the "want a hint?" nudge and the idle stop. */
   lastChangeAt: timestamp("last_change_at", { withTimezone: true }),
   nudgedAt: timestamp("nudged_at", { withTimezone: true }),
+  /** The camera program couldn't open the camera (reported by the Pi), or null when it's working. */
+  cameraError: text("camera_error"),
+  /** The last time reading a photo or checking work failed, and why. Shown on the station's screen. */
+  lastError: text("last_error"),
+  lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
   pinFailures: integer("pin_failures").notNull().default(0),
   pinLockedUntil: timestamp("pin_locked_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

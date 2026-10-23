@@ -6,8 +6,8 @@ import { account, kids, stations, turns, tutorSessions, type DeskState, type Lin
 import type { TutorReply } from "@/lib/tutor-reply";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "./errors";
 import { getKid } from "./family";
-import { engine, flagSession, sendKidTurn, startSession } from "./tutor";
-import { getUpload, saveUpload } from "./uploads";
+import { engine, flagSession, sendKidTurn, startSession, TutorError } from "./tutor";
+import { deleteUpload, getUpload, saveUpload } from "./uploads";
 
 type Station = typeof stations.$inferSelect;
 
@@ -22,6 +22,8 @@ const JOIN_RECENT_MS = 30 * 60_000;
 const BUSY_TIMEOUT_MS = 120_000;
 const PIN_MAX_FAILURES = 5;
 const PIN_LOCK_MS = 60_000;
+/** A tutor error is shown on the station for this long after it happens. */
+const ERROR_SHOWN_MS = 3 * 60_000;
 
 const emptyDesk = (): DeskState => ({ lines: [], marks: [], snapshotId: null, unreadable: null, lastTutorAt: null });
 
@@ -92,7 +94,7 @@ export async function listStations() {
     .leftJoin(kids, eq(kids.id, tutorSessions.kidId))
     .where(isNotNull(stations.approvedAt))
     .orderBy(stations.name);
-  return rows.map((r) => ({ ...publicStation(r.s), inUseBy: r.kidName }));
+  return rows.map((r) => ({ ...publicStation(r.s), inUseBy: r.kidName, problems: problems(r.s) }));
 }
 
 export async function renameStation(id: number, name: string) {
@@ -312,7 +314,14 @@ export async function handleFrame(station: Station, image: Buffer, mediaType: st
 
     const upload = await saveUpload(session.kidId, mediaType, image);
     const before = session.desk ?? emptyDesk();
-    const reading = await engine().readPage(image, mediaType, before.lines);
+    let reading;
+    try {
+      reading = await engine().readPage(image, mediaType, before.lines);
+    } catch (e) {
+      // Don't keep photos that couldn't be read; the camera tries again shortly.
+      await deleteUpload(upload.id);
+      throw e;
+    }
 
     if (reading.unreadable && reading.lines.length === 0) {
       await saveDesk(session.id, { ...before, unreadable: reading.unreadable });
@@ -334,10 +343,33 @@ export async function handleFrame(station: Station, image: Buffer, mediaType: st
     }
     // A partly covered page isn't checked until it can be read clearly.
     const turn = reading.unreadable ? null : await maybeCheck(session.id, session.kidId, desk, wasRequested);
+    if (station.lastError) await db.update(stations).set({ lastError: null, lastErrorAt: null }).where(eq(stations.id, station.id));
     return { status: "read" as const, lines: desk.lines.length, checked: !!turn };
+  } catch (e) {
+    await recordError(station.id, e);
+    throw e;
   } finally {
     await unlock(station.id);
   }
+}
+
+/** Remember a tutor/reader failure so the station's screen (and the parent page) can explain it. */
+async function recordError(stationId: number, e: unknown) {
+  const message = e instanceof TutorError ? e.message : "Something went wrong reading the page.";
+  await db.update(stations).set({ lastError: message, lastErrorAt: new Date() }).where(eq(stations.id, stationId));
+}
+
+/** The Pi reports whether it could open the camera. */
+export async function reportCamera(station: Station, error: string | null) {
+  await db.update(stations).set({ cameraError: error?.slice(0, 300) || null }).where(eq(stations.id, station.id));
+}
+
+/** Problems to show on the station's screen and the parent page, in plain words. */
+export function problems(s: Station) {
+  return {
+    camera: s.cameraError,
+    tutor: s.lastError && s.lastErrorAt && Date.now() - s.lastErrorAt.getTime() < ERROR_SHOWN_MS ? s.lastError : null,
+  };
 }
 
 /**
@@ -363,6 +395,8 @@ export async function tick(station: Station) {
   if (session?.desk && uncheckedLines(session.desk).length && (await lock(station.id))) {
     try {
       await maybeCheck(session.id, session.kidId, session.desk, false);
+    } catch (e) {
+      await recordError(station.id, e);
     } finally {
       await unlock(station.id);
     }
@@ -373,7 +407,10 @@ export async function tick(station: Station) {
 // ---------- what the station shows ----------
 
 export async function stationState(station: Station) {
-  const base = { station: { name: station.name, approved: !!station.approvedAt, pairCode: station.pairCode } };
+  const base = {
+    station: { name: station.name, approved: !!station.approvedAt, pairCode: station.pairCode },
+    problems: problems(station),
+  };
   if (!station.approvedAt) return { ...base, kids: [], active: null };
   if (!station.activeSessionId) {
     const list = await db.select({ id: kids.id, name: kids.name, assistantName: kids.assistantName }).from(kids).orderBy(kids.name);

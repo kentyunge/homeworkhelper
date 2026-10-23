@@ -22,7 +22,23 @@ echo "==> Installing packages (a few minutes)"
 sudo apt-get update
 CHROMIUM=chromium
 apt-cache show chromium >/dev/null 2>&1 || CHROMIUM=chromium-browser
-sudo apt-get install -y python3-picamera2 python3-numpy python3-pil "$CHROMIUM" speech-dispatcher espeak-ng
+sudo apt-get install -y python3-picamera2 python3-numpy python3-pil "$CHROMIUM" speech-dispatcher espeak-ng rpicam-apps || \
+  sudo apt-get install -y python3-picamera2 python3-numpy python3-pil "$CHROMIUM" speech-dispatcher espeak-ng
+
+echo "==> Checking the camera"
+if ! /usr/bin/python3 -c "import picamera2" 2>/dev/null; then
+  echo "The camera software (python3-picamera2) didn't install. This needs Raspberry Pi OS (64-bit, with desktop)."
+  echo "Check the system with: cat /etc/os-release"
+  exit 1
+fi
+CAMERAS=$(/usr/bin/python3 -c "from picamera2 import Picamera2; print(len(Picamera2.global_camera_info()))" 2>/dev/null || echo 0)
+if [ "$CAMERAS" = "0" ]; then
+  echo "WARNING: no camera found. Shut down (sudo shutdown now), unplug, and reseat the camera's ribbon cable:"
+  echo "  on the Pi, metal contacts face the HDMI ports; on the camera, they face the circuit board."
+  echo "The rest of the setup continues; the station shows a message until the camera is found."
+else
+  echo "Camera found."
+fi
 
 echo "==> Downloading the station program"
 mkdir -p "$DIR"

@@ -20,6 +20,7 @@ type Active = {
 };
 type State = {
   station: { name: string; approved: boolean; pairCode: string | null };
+  problems: { camera: string | null; tutor: string | null };
   kids: KidOption[];
   active: Active | null;
   nudge?: boolean;
@@ -280,7 +281,14 @@ export function StationView() {
             </div>
           </div>
           <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-white/10 bg-white/5 p-3 text-[15px] leading-snug">
-            {banner ? (
+            {state.problems.camera ? (
+              <p className="text-destructive">{state.problems.camera}</p>
+            ) : state.problems.tutor ? (
+              <p className="text-destructive">
+                <span className="font-semibold">Can&apos;t check your work right now. </span>
+                {state.problems.tutor}
+              </p>
+            ) : banner ? (
               <p className="text-warn">{banner}</p>
             ) : issue ? (
               <p>
@@ -359,6 +367,7 @@ function Idle({ state, asleep, onPick, banner }: { state: State; asleep: boolean
         <Orb state="idle" size={120} />
         <Clock />
         <p className="text-glow text-sm font-semibold tracking-widest uppercase">{state.station.name}</p>
+        {state.problems.camera && <p className="text-destructive max-w-xs text-center text-sm">{state.problems.camera}</p>}
       </div>
       <div className="flex w-[330px] flex-col gap-3">
         <p className="text-muted-foreground text-center">{banner ?? "Tap your name to start"}</p>

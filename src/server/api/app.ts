@@ -85,6 +85,13 @@ api.get("/kids/:id/sessions", async (c) => {
   return c.json(await tutor.listSessions(id(c), 100));
 });
 
+/** Parent page: "Check connection" makes a tiny Claude request and explains any problem. */
+api.post("/usage/check", async (c) => {
+  requireParent(c.get("actor"));
+  const { checkClaude } = await import("../tutor/engine");
+  return c.json(await checkClaude());
+});
+
 api.get("/usage", async (c) => {
   requireParent(c.get("actor"));
   return c.json({
@@ -243,6 +250,14 @@ api.post("/stations/pair", async (c) => c.json(await desk.requestPairing(), 201)
 const stationOf = (c: Context) => desk.stationForToken(c.req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? null);
 
 api.get("/station/camera", async (c) => c.json(desk.cameraState(await stationOf(c))));
+
+/** The Pi reports whether its camera works (error = null when it does). */
+api.post("/station/status", async (c) => {
+  const s = await stationOf(c);
+  const { cameraError } = await body(c, z.object({ cameraError: z.string().max(1000).nullable() }));
+  await desk.reportCamera(s, cameraError);
+  return c.json({ ok: true });
+});
 
 api.get("/station/state", async (c) => c.json(await desk.stationState(await stationOf(c))));
 

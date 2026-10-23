@@ -39,7 +39,7 @@ The HyperPixel stays dark until the installer turns it on in step 3. Until then,
 From a Mac terminal (or any computer on the same Wi-Fi), sign in to the Pi:
 
 ```bash
-ssh your-username@homework-station.local
+ssh your-username@homework-station.local   # or whatever hostname you chose
 ```
 
 Then run the installer, replacing the address with your app's:
@@ -100,6 +100,23 @@ After 4 quiet minutes the station offers a hint. After 15 it stops watching. Wit
 
 **The screen stays dark or shows the wrong orientation.**
 The installer added `dtoverlay=vc4-kms-dpi-hyperpixel4` to `/boot/firmware/config.txt`. Check Pimoroni's HyperPixel 4.0 guide for your Raspberry Pi OS version. It covers turning the screen to landscape, matching the touch to the rotation, and lines to remove if the screen stays dark (some setups conflict with `dtparam=i2c_arm=on` or `dtparam=spi=on`).
+
+**The screen is vertical (portrait).**
+Over SSH, find the screen's name and try a rotation:
+```bash
+export WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/$(id -u)
+wlr-randr                                   # the first line is the screen's name, e.g. DPI-1
+wlr-randr --output DPI-1 --transform 90     # or 270 if it's upside down
+```
+To keep it, add the working command to the top of the desktop's startup file, then restart:
+```bash
+sed -i '1i wlr-randr --output DPI-1 --transform 90' ~/.config/labwc/autostart
+sudo reboot
+```
+If taps land in the wrong place afterwards, find the touchscreen's name with `libinput list-devices` and add `<touch deviceName="THAT NAME" mapToOutput="DPI-1" />` inside `<labwc_config>` in `~/.config/labwc/rc.xml`.
+
+**The station's screen shows a red message.**
+It explains what's wrong in plain words: for example the camera software is missing, no camera was found (check the ribbon cable), or the Anthropic API key has a problem. The parent page shows the same message under Desk stations, and **Check Claude connection** on the parent page tests the API key.
 
 **"This station isn't set up yet" or the pairing code doesn't work.**
 Codes expire after 30 minutes. To get a new one:

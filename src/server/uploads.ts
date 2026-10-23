@@ -47,3 +47,7 @@ export async function purgeOldUploads(now = new Date()) {
   const cutoff = new Date(now.getTime() - KEEP_DAYS * 24 * 60 * 60 * 1000);
   await db.delete(uploads).where(lt(uploads.createdAt, cutoff));
 }
+
+export async function deleteUpload(id: number) {
+  await db.delete(uploads).where(eq(uploads.id, id));
+}
