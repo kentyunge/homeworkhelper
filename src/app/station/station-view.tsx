@@ -80,6 +80,50 @@ async function speakBuiltIn(text: string, voiceName?: string): Promise<string | 
   });
 }
 
+/** Play audio from a URL; resolves with an error message, or null when it played to the end. */
+function playAudio(el: HTMLAudioElement, url: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    el.src = url;
+    el.onended = () => resolve(null);
+    el.onerror = () => resolve("The browser couldn't play the sound file");
+    el.play().catch((e: Error) => resolve(e.name === "NotAllowedError" ? "The browser blocked sound (autoplay). Rerun the installer and restart." : `Couldn't play sound: ${e.message}`));
+  });
+}
+
+/** A short tone as a WAV file, to test the speaker without any voice involved. */
+function beepUrl(): string {
+  const rate = 16000;
+  const n = Math.round(rate * 0.5);
+  const bytes = new Uint8Array(44 + n * 2);
+  const v = new DataView(bytes.buffer);
+  const str = (o: number, t: string) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, "RIFF");
+  v.setUint32(4, 36 + n * 2, true);
+  str(8, "WAVEfmt ");
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  str(36, "data");
+  v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const fade = Math.min(1, i / 800, (n - i) / 800);
+    v.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * 660 * i) / rate) * 9000 * fade), true);
+  }
+  let bin = "";
+  bytes.forEach((b) => (bin += String.fromCharCode(b)));
+  return `data:audio/wav;base64,${btoa(bin)}`;
+}
+
+/** The server's error message from a failed request. */
+async function errorText(res: Response) {
+  const j = (await res.json().catch(() => ({}))) as { error?: string };
+  return j.error ?? `Request failed (${res.status})`;
+}
+
 class StationError extends Error {
   constructor(
     public status: number,
@@ -98,6 +142,9 @@ export function StationView() {
   const [pinFor, setPinFor] = useState<KidOption | null>(null);
   const [speaking, setSpeaking] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  /** The last reason the station couldn't speak, shown until the next sound check. */
+  const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
+  const [soundCheck, setSoundCheck] = useState<SoundResult[] | null>(null);
   const lastTouch = useRef(0);
   const spokenTurn = useRef<number | null>(null);
   /** Finished problems already celebrated (null until the first state arrives, so old ones aren't). */
@@ -142,18 +189,16 @@ export function StationView() {
           });
           if (res.ok) {
             const url = URL.createObjectURL(await res.blob());
-            const a = audio.current!;
-            a.src = url;
-            await new Promise<void>((resolve) => {
-              a.onended = a.onerror = () => resolve();
-              a.play().catch(() => resolve());
-            });
+            const problem = await playAudio(audio.current!, url);
             URL.revokeObjectURL(url);
-            return;
+            if (!problem) return;
+            setVoiceProblem(problem);
+          } else {
+            setVoiceProblem(await errorText(res));
           }
         }
-        const problem = await speakBuiltIn(text, voice?.voiceId);
-        if (problem) console.warn("[station] built-in voice:", problem);
+        const problem = await speakBuiltIn(text, voice?.voiceProvider === "elevenlabs" ? undefined : voice?.voiceId);
+        if (problem) setVoiceProblem(`Built-in voice: ${problem}`);
       } finally {
         setSpeaking(false);
       }
@@ -293,6 +338,7 @@ export function StationView() {
     }
     return (
       <Shell onTouch={touch}>
+        {soundCheck && <SoundCheck results={soundCheck} onClose={() => setSoundCheck(null)} />}
         <Idle
           state={state}
           asleep={asleep}
@@ -300,18 +346,34 @@ export function StationView() {
           banner={banner}
           onTestVoice={async () => {
             touch();
-            setBanner("Playing a test…");
+            setVoiceProblem(null);
+            const results: SoundResult[] = [
+              { name: "Speaker", status: "running" },
+              { name: "Built-in voice", status: "waiting" },
+              { name: "Natural voice (ElevenLabs)", status: "waiting" },
+            ];
+            const show = () => setSoundCheck(results.map((r) => ({ ...r })));
+            const done = (i: number, problem: string | null, okText: string) => {
+              results[i] = { ...results[i], status: problem ? "failed" : "ok", detail: problem ?? okText };
+              if (results[i + 1]) results[i + 1].status = "running";
+              show();
+            };
+            show();
             setSpeaking(true);
+            done(0, await playAudio(audio.current!, beepUrl()), "You should have heard a tone.");
             const voices = await loadVoices();
-            const problem = await speakBuiltIn(`Hi, this is ${state.station.name}. If you can hear me, the voice works.`);
-            setSpeaking(false);
-            setBanner(
-              problem
-                ? `${problem}. Rerun the installer and restart the station.`
-                : voices.length
-                  ? `Played with ${voices.length} voice${voices.length === 1 ? "" : "s"} available. Didn't hear it? Check the speaker output.`
-                  : "The browser lists no voices, so this used its default. Didn't hear it? Rerun the installer and restart.",
+            done(
+              1,
+              await speakBuiltIn(`Hi, this is ${state.station.name}. This is the built-in voice.`),
+              voices.length ? `Spoke with one of ${voices.length} voices.` : "Spoke with the browser's default voice.",
             );
+            const res = await fetch("/api/v1/station/voice-test", { method: "POST", headers: { authorization: `Bearer ${token}` } });
+            if (res.ok) {
+              const url = URL.createObjectURL(await res.blob());
+              done(2, await playAudio(audio.current!, url), "Played a natural voice clip.");
+              URL.revokeObjectURL(url);
+            } else done(2, await errorText(res), "");
+            setSpeaking(false);
           }}
         />
       </Shell>
@@ -347,6 +409,11 @@ export function StationView() {
               <p className="text-destructive">
                 <span className="font-semibold">Can&apos;t check your work right now. </span>
                 {state.problems.tutor}
+              </p>
+            ) : voiceProblem ? (
+              <p className="text-destructive">
+                <span className="font-semibold">Can&apos;t speak: </span>
+                {voiceProblem}
               </p>
             ) : banner ? (
               <p className="text-warn">{banner}</p>
@@ -441,7 +508,7 @@ function Idle({
         <p className="text-glow text-sm font-semibold tracking-widest uppercase">{state.station.name}</p>
         {state.problems.camera && <p className="text-destructive max-w-xs text-center text-sm">{state.problems.camera}</p>}
         <button type="button" onClick={onTestVoice} className="text-muted-foreground flex items-center gap-1.5 text-sm underline-offset-4 active:underline">
-          <Volume2 className="size-4" /> Test voice
+          <Volume2 className="size-4" /> Sound check
         </button>
       </div>
       <div className="flex w-[330px] flex-col gap-3">
@@ -626,6 +693,39 @@ function PageView({ desk, token }: { desk: DeskState; token: string }) {
           <Markdown>{`Can't read the page right now: ${desk.unreadable}`}</Markdown>
         </div>
       )}
+    </div>
+  );
+}
+
+type SoundResult = { name: string; status: "waiting" | "running" | "ok" | "failed"; detail?: string };
+
+/** Results of the sound check: the speaker, the built-in voice, and ElevenLabs, each tested on its own. */
+function SoundCheck({ results, onClose }: { results: SoundResult[]; onClose: () => void }) {
+  const finished = results.every((r) => r.status === "ok" || r.status === "failed");
+  return (
+    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/70 p-6">
+      <div className="bg-card w-full max-w-lg space-y-3 rounded-2xl border border-white/10 p-5">
+        <p className="text-lg font-semibold">Sound check</p>
+        {results.map((r) => (
+          <div key={r.name} className="flex gap-3">
+            <span className="w-6 shrink-0 text-center text-lg">
+              {r.status === "ok" ? "✓" : r.status === "failed" ? "✗" : r.status === "running" ? "…" : ""}
+            </span>
+            <div className="min-w-0">
+              <p className={cn("font-medium", r.status === "ok" && "text-ok", r.status === "failed" && "text-destructive")}>{r.name}</p>
+              {r.detail && <p className="text-muted-foreground text-sm">{r.detail}</p>}
+            </div>
+          </div>
+        ))}
+        {finished && (
+          <p className="text-muted-foreground text-xs">
+            A ✓ means the browser played it. If you heard nothing for a ✓, the sound is going to a different output: see &ldquo;No sound&rdquo; in pi/README.md.
+          </p>
+        )}
+        <button type="button" onClick={onClose} className="bg-primary text-primary-foreground w-full rounded-xl py-3 font-semibold disabled:opacity-50" disabled={!finished}>
+          {finished ? "Close" : "Testing…"}
+        </button>
+      </div>
     </div>
   );
 }

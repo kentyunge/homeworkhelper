@@ -310,6 +310,21 @@ api.get("/station/snapshots/:id", async (c) => {
   return new Response(new Uint8Array(u.data), { headers: { "content-type": u.mediaType, "cache-control": "private, max-age=3600" } });
 });
 
+/**
+ * Sound check: a short ElevenLabs clip, without needing a session. Uses the watched kid's voice, else the
+ * first kid set to ElevenLabs, else ELEVENLABS_DEFAULT_VOICE_ID.
+ */
+api.post("/station/voice-test", async (c) => {
+  const s = await stationOf(c);
+  const st = await desk.stationState(s);
+  const kidsList = await family.listKids();
+  const voiceId =
+    (st.active?.kid.voiceProvider === "elevenlabs" ? st.active.kid.voiceId : "") ||
+    kidsList.find((k) => k.voiceProvider === "elevenlabs" && k.voiceId)?.voiceId ||
+    "";
+  return elevenLabsSpeech(`Hi, this is ${s.name}. This is the natural voice.`, voiceId);
+});
+
 api.post("/station/tts", async (c) => {
   const s = await stationOf(c);
   const { text } = await body(c, z.object({ text: z.string().max(1000) }));
