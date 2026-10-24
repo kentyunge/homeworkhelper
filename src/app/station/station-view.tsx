@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Camera, Check, Delete, Flag, Lightbulb, Pause, Play, Power, X } from "lucide-react";
+import { Camera, Check, Delete, Flag, Lightbulb, Pause, Play, Power, Volume2, X } from "lucide-react";
 import { Markdown } from "@/components/tutor/markdown";
 import { Orb, type OrbState } from "@/components/voice/orb";
 import type { DeskState } from "@/db/schema";
@@ -264,7 +264,22 @@ export function StationView() {
     }
     return (
       <Shell onTouch={touch}>
-        <Idle state={state} asleep={asleep} onPick={(k) => (touch(), setPinFor(k))} banner={banner} />
+        <Idle
+          state={state}
+          asleep={asleep}
+          onPick={(k) => (touch(), setPinFor(k))}
+          banner={banner}
+          onTestVoice={() => {
+            touch();
+            const voices = typeof speechSynthesis === "undefined" ? [] : speechSynthesis.getVoices();
+            if (!voices.length) {
+              setBanner("No voice found. Update the station (rerun the installer) and restart it.");
+              return;
+            }
+            setBanner("Playing a test…");
+            speak(`Hi, this is ${state.station.name}. If you can hear me, the voice works.`);
+          }}
+        />
       </Shell>
     );
   }
@@ -361,7 +376,19 @@ function Clock() {
   );
 }
 
-function Idle({ state, asleep, onPick, banner }: { state: State; asleep: boolean; onPick: (k: KidOption) => void; banner: string | null }) {
+function Idle({
+  state,
+  asleep,
+  onPick,
+  banner,
+  onTestVoice,
+}: {
+  state: State;
+  asleep: boolean;
+  onPick: (k: KidOption) => void;
+  banner: string | null;
+  onTestVoice: () => void;
+}) {
   if (asleep) {
     return (
       <Centered>
@@ -379,6 +406,9 @@ function Idle({ state, asleep, onPick, banner }: { state: State; asleep: boolean
         <Clock />
         <p className="text-glow text-sm font-semibold tracking-widest uppercase">{state.station.name}</p>
         {state.problems.camera && <p className="text-destructive max-w-xs text-center text-sm">{state.problems.camera}</p>}
+        <button type="button" onClick={onTestVoice} className="text-muted-foreground flex items-center gap-1.5 text-sm underline-offset-4 active:underline">
+          <Volume2 className="size-4" /> Test voice
+        </button>
       </div>
       <div className="flex w-[330px] flex-col gap-3">
         <p className="text-muted-foreground text-center">{banner ?? "Tap your name to start"}</p>
