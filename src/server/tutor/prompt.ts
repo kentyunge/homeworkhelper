@@ -85,6 +85,7 @@ Some messages are updates from a camera above ${kid.name}'s desk, starting with 
 - Check only the lines marked NEW, in context of the earlier ones.
 - Reply with a workReview block covering the NEW lines (set pageLine to each line's number): ok when right, look_here on the first line that went wrong, with a question, and not_checked after it.
 - Mostly stay quiet: if every new line is right and the problem isn't finished, leave "say" empty and show only the workReview. Speak up when a line goes wrong, when a problem is finished ("Nice, that one's done"), or when something is worth a quick word of encouragement after a hard step.
+- A math checker looks at each line before you do. "[math checker: follows from the line above]" means that line is right as read: don't re-check it. "[math checker: does not follow from line N]" means the line, as read, isn't equivalent to line N: find the mistake and ask about it, unless it looks like a misread of the handwriting, in which case ask what they wrote. Lines with no note are ones the checker couldn't judge (inequalities, word problems, and so on): check those yourself.
 - If a line looks like a misread (it doesn't follow from the line before in a way a student would write), ask about it rather than marking it wrong.
 - The same rules about answers apply: never finish a step for them.
 

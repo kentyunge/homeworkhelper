@@ -25,8 +25,8 @@ class DeskEngine implements TutorEngine {
     const last = messages[messages.length - 1];
     const text = typeof last.content === "string" ? last.content : last.content.map((b) => (b.type === "text" ? b.text : "")).join("");
     this.replies.push(text);
-    const fresh = [...text.matchAll(/^(\d+)\. NEW: \$(.*)\$$/gm)].map((m) => ({ n: Number(m[1]), latex: m[2] }));
-    const bad = fresh.find((l) => l.latex.includes("BAD"));
+    const fresh = [...text.matchAll(/^(\d+)\. NEW: \$(.*?)\$(.*)$/gm)].map((m) => ({ n: Number(m[1]), latex: m[2], note: m[3] }));
+    const bad = fresh.find((l) => l.latex.includes("BAD") || l.note.includes("does not follow"));
     const r: TutorReply = {
       say: bad ? "Look again at that line." : "",
       show: fresh.length
@@ -153,51 +153,87 @@ describe("starting at the station", () => {
 });
 
 describe("watching the page", () => {
-  it("reads each photo, sends only new handwritten lines to the tutor, and keeps its marks", async () => {
+  it("marks correct lines right away without the tutor, and sends mistakes to it immediately", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const { token, sessionId } = await watching();
+    const problem = { ...PROBLEM, newProblem: true };
+    const marksNow = async () => (await db.select().from(tutorSessions).where(eq(tutorSessions.id, sessionId)))[0].desk!.marks;
 
-    eng.pages.push({ lines: [PROBLEM, line("3x-12=2x+5")] });
-    expect(await desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).toMatchObject({ status: "read", checked: true });
-    expect(eng.replies[0]).toBe("[Desk camera] The lines on the page now:\n1. (printed) $3(x-4)=2x+5$\n2. NEW: $3x-12=2x+5$");
-
-    // Another line soon after: read, but the tutor waits so it isn't chatty.
-    vi.setSystemTime(Date.now() + 5_000);
-    eng.pages.push({ lines: [PROBLEM, line("3x-12=2x+5"), line("x-12=5")] });
+    eng.pages.push({ lines: [problem, line("3x-12=2x+5")] });
     expect(await desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).toMatchObject({ status: "read", checked: false });
+    vi.setSystemTime(Date.now() + 3_000);
+    eng.pages.push({ lines: [problem, line("3x-12=2x+5"), line("x-12=5")] });
+    await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    expect(eng.replies).toHaveLength(0);
+    expect((await marksNow()).map((m) => [m.status, m.by])).toEqual([["not_checked", undefined], ["ok", "engine"], ["ok", "engine"]]);
+
+    // A mistake goes to the tutor right away, even though the last check was moments ago.
+    vi.setSystemTime(Date.now() + 3_000);
+    eng.pages.push({ lines: [problem, line("3x-12=2x+5"), line("x-12=5"), line("x=-7")] });
+    const result = await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    expect(result).toMatchObject({ status: "read", checked: true, timing: { tutorMs: expect.any(Number) } });
+    expect(eng.replies).toEqual([
+      "[Desk camera] The lines on the page now:\n1. (printed) $3(x-4)=2x+5$\n" +
+        "2. $3x-12=2x+5$ [math checker: follows from the line above]\n3. $x-12=5$ [math checker: follows from the line above]\n" +
+        "4. NEW: $x=-7$ [math checker: does not follow from line 3]",
+    ]);
+    expect((await marksNow())[3]).toMatchObject({ status: "look_here", by: "tutor", note: "Check the sign?" });
+    expect((await desk.stationState(await station(token))).active?.lastReply?.say).toBe("Look again at that line.");
+
+    // Work that continues from the mistake isn't marked right.
+    vi.setSystemTime(Date.now() + 3_000);
+    eng.pages.push({ lines: [problem, line("3x-12=2x+5"), line("x-12=5"), line("x=-7"), line("-7=x")] });
+    await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    expect((await marksNow())[4]).toMatchObject({ status: "not_checked" });
+    expect(eng.replies).toHaveLength(1);
+
+    // Desk turns show the photo in the app but don't send it to the tutor.
+    const deskTurn = (await db.select().from(turns).where(eq(turns.sessionId, sessionId))).find((t) => t.role === "kid")!;
+    expect(deskTurn.kid).toMatchObject({ source: "desk", uploadIds: [] });
+    expect(deskTurn.kid?.snapshotId).toBeGreaterThan(0);
+  });
+
+  it("spots a finished answer", async () => {
+    const { token, sessionId } = await watching();
+    eng.pages.push({ lines: [{ ...line("x-12=5", false), newProblem: true }, line("x=17")] });
+    await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    const [s] = await db.select().from(tutorSessions).where(eq(tutorSessions.id, sessionId));
+    expect(s.desk?.marks[1]).toMatchObject({ status: "ok", solved: true, by: "engine" });
+    expect(eng.replies).toHaveLength(0);
+  });
+
+  it("sends lines the engine can't judge to the tutor, at most every few seconds", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { token } = await watching();
+    eng.pages.push({ lines: [line("x>2"), line("x>2.5")] });
+    await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    expect(eng.replies).toHaveLength(1);
+    expect(eng.replies[0]).toContain("2. NEW: $x>2.5$");
+
+    vi.setSystemTime(Date.now() + 5_000);
+    eng.pages.push({ lines: [line("x>2"), line("x>2.5"), line("x>3")] });
+    expect(await desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).toMatchObject({ checked: false });
     expect(eng.replies).toHaveLength(1);
 
     // The station's regular tick picks it up once enough time has passed.
     vi.setSystemTime(Date.now() + desk.MIN_CHECK_GAP_MS);
     await desk.tick(await station(token));
     expect(eng.replies).toHaveLength(2);
-    expect(eng.replies[1]).toContain("2. $3x-12=2x+5$\n3. NEW: $x-12=5$");
-
-    vi.setSystemTime(Date.now() + desk.MIN_CHECK_GAP_MS);
-    eng.pages.push({ lines: [PROBLEM, line("3x-12=2x+5"), line("x-12=5"), line("x=BAD")] });
-    await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
-    const [s] = await db.select().from(tutorSessions).where(eq(tutorSessions.id, sessionId));
-    expect(s.desk?.marks.map((m) => m.status)).toEqual(["not_checked", "ok", "ok", "look_here"]);
-    expect(s.desk?.marks[3].note).toBe("Check the sign?");
-    expect((await desk.stationState(await station(token))).active?.lastReply?.say).toBe("Look again at that line.");
-
-    // Desk turns show the photo in the app but don't send it to the tutor.
-    const kidTurns = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
-    const deskTurn = kidTurns.find((t) => t.role === "kid")!;
-    expect(deskTurn.kid).toMatchObject({ source: "desk", uploadIds: [] });
-    expect(deskTurn.kid?.snapshotId).toBeGreaterThan(0);
+    expect(eng.replies[1]).toContain("3. NEW: $x>3$");
   });
 
-  it("checks right away when the kid taps Check now", async () => {
+  it("asks the tutor when the kid taps Check now, even if the engine already marked everything", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const { token } = await watching();
-    eng.pages.push({ lines: [line("a=1")] }, { lines: [line("a=1"), line("b=2")] });
+    eng.pages.push({ lines: [line("2x=10"), line("x=5")] }, { lines: [line("2x=10"), line("x=5")] });
     await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    expect(eng.replies).toHaveLength(0);
     vi.setSystemTime(Date.now() + 1_000);
     await desk.requestCheck(await station(token));
     expect(desk.cameraState(await station(token)).captureRequested).toBe(true);
     await desk.handleFrame(await station(token), JPEG, "image/jpeg", true);
-    expect(eng.replies).toHaveLength(2);
+    expect(eng.replies).toHaveLength(1);
+    expect(eng.replies[0]).toContain("(The student tapped Check now.)");
     expect(desk.cameraState(await station(token)).captureRequested).toBe(false);
   });
 
@@ -207,11 +243,11 @@ describe("watching the page", () => {
     eng.pages.push({ lines: [line("a=1")] });
     await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
     vi.setSystemTime(Date.now() + 60_000);
-    eng.pages.push({ lines: [line("a=1")] }, { lines: [], unreadable: "A hand is covering the page" }, { lines: [line("a=1"), line("b=2")], unreadable: "Partly covered" });
+    eng.pages.push({ lines: [line("a=1")] }, { lines: [], unreadable: "A hand is covering the page" }, { lines: [line("a=1"), line("b>2")], unreadable: "Partly covered" });
     await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
     expect(await desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).toMatchObject({ status: "unreadable" });
     await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
-    expect(eng.replies).toHaveLength(1);
+    expect(eng.replies).toHaveLength(0);
     const [s] = await db.select().from(tutorSessions).where(eq(tutorSessions.id, sessionId));
     expect(s.desk?.unreadable).toBe("Partly covered");
   });

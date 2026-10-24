@@ -8,7 +8,7 @@ Study assistant for two kids (grades 7 and 9). See README.md for features and se
 - Replies are structured output (`src/lib/tutor-reply.ts`): `say` is spoken (no symbols), `show` is on-screen blocks. New visual = schema + prompt guidance + renderer in `src/components/tutor/`.
 - Conversation history sent to Claude must stay append-only, and a session's system prompt is frozen at creation (`tutor_sessions.system_prompt`). Never edit stored turns or `turns.api`; add new turns instead.
 - Every mutation goes through `src/server/*` services, exposed at `/api/v1` (`src/server/api/app.ts`). Client components call the API via `src/lib/api-client.ts`.
-- Desk station (`src/server/desk.ts`, `src/app/station/`, `public/pi/`): the Pi signs in with its own token, never a kid's login. Desk updates reach the tutor as text kid turns (`source: "desk"`); photos aren't sent to the tutor. Camera logic tests: `python3 -m unittest discover tests/pi`.
+- Desk station (`src/server/desk.ts`, `src/app/station/`, `public/pi/`): the Pi signs in with its own token, never a kid's login. Desk updates reach the tutor as text kid turns (`source: "desk"`); photos aren't sent to the tutor. The math engine (`src/lib/math-check.ts`) checks lines first and must never guess: anything it can't decide is "unknown" and goes to the tutor. Camera logic tests: `python3 -m unittest discover tests/pi`.
 - Kids only see their own sessions (`canSeeSession` in `src/server/access.ts`); parents see everything.
 - Schema changes: edit `src/db/schema.ts`, then `npm run db:generate`.
 - Checks before committing: `npm run lint && npm run typecheck && npm test`.

@@ -20,7 +20,7 @@ A voice-first study assistant for the kids. It guides their thinking with hints,
 
 ## Desk station (optional)
 
-A Raspberry Pi with a camera above the desk and a small touchscreen. Kids tap their name, enter their PIN, and work on paper. A low-cost model reads each new line from the photo, the tutor checks new lines (at most every 12 seconds while writing continues), and the screen shows the page with a ✓ beside lines that are right and a ? on the first one to look at again. The same conversation shows on the Chromebook. Setup guide: [pi/README.md](pi/README.md). The installer is served by the app at `/pi/install`.
+A Raspberry Pi with a camera above the desk and a small touchscreen. Kids tap their name, enter their PIN, and work on paper. A low-cost model reads each new line from the photo, and a math engine (`src/lib/math-check.ts`, no AI) checks whether each line follows from the one above, in milliseconds. The tutor is called only for mistakes, lines the engine can't judge (inequalities, word problems; at most every 12 seconds), or Check now, and the screen shows the page with a ✓ beside lines that are right and a ? on the first one to look at again. The same conversation shows on the Chromebook. Setup guide: [pi/README.md](pi/README.md). The installer is served by the app at `/pi/install`.
 
 ## Stack
 

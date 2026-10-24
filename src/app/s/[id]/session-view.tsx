@@ -6,12 +6,14 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, ArrowUp, Camera, Check, Flag, Mic, Paperclip, RotateCw, ScanLine, Volume2, VolumeX, X } from "lucide-react";
 import { toast } from "sonner";
 import { TutorBlocks } from "@/components/tutor/blocks";
+import { TeX } from "@/components/tutor/markdown";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Orb, type OrbState } from "@/components/voice/orb";
 import { useListener, useSpeaker, type VoiceProvider } from "@/components/voice/use-voice";
 import { api } from "@/lib/api-client";
+import type { DeskState } from "@/db/schema";
 import type { TutorReply } from "@/lib/tutor-reply";
 import { uploadFile } from "@/lib/upload-client";
 import { cn } from "@/lib/utils";
@@ -33,6 +35,7 @@ type SessionData = {
   turns: Turn[];
   awaitingReply: boolean;
   deskStation: { id: number; name: string; live: boolean } | null;
+  desk: DeskState | null;
 };
 type StationOption = { id: number; name: string; watchingThis: boolean; busy: boolean };
 
@@ -342,6 +345,10 @@ export function SessionView(props: {
         </p>
       )}
 
+      {data?.desk && data.desk.lines.some((l) => l.handwritten) && (data.deskStation || readOnly) && (
+        <PagePanel desk={data.desk} showTiming={readOnly} />
+      )}
+
       {/* conversation */}
       <div className="flex-1 space-y-6 px-3 py-4">
         {data?.turns.length === 0 && !thinking && (
@@ -577,5 +584,53 @@ function TutorTurn({ reply, name, onReplay }: { reply: TutorReply; name: string;
         </div>
       )}
     </div>
+  );
+}
+
+/** What's on the paper under the desk camera, with the ✓ and ? marks the station shows. */
+function PagePanel({ desk, showTiming }: { desk: DeskState; showTiming: boolean }) {
+  const t = desk.timing;
+  const secs = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+  return (
+    <section className="border-border bg-card/60 mx-3 mt-3 rounded-xl border p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <p className="text-glow text-xs font-semibold tracking-widest uppercase">On your page</p>
+        {desk.snapshotId && (
+          <a href={`/api/v1/uploads/${desk.snapshotId}`} target="_blank" rel="noreferrer" className="text-muted-foreground ml-auto text-xs underline">
+            See photo
+          </a>
+        )}
+      </div>
+      <ol className="space-y-1">
+        {desk.lines.map((l, i) => {
+          const m = desk.marks[i]?.latex === l.latex ? desk.marks[i] : null;
+          return (
+            <li key={i} className={cn("flex items-center gap-2 rounded-md px-2 py-1", m?.status === "look_here" && "bg-warn/10 ring-warn/40 ring-1")}>
+              <span className="w-5 shrink-0 text-center">
+                {!l.handwritten ? null : m?.status === "ok" ? (
+                  <Check className="text-ok size-4" aria-label="Looks right" />
+                ) : m?.status === "look_here" ? (
+                  <span className="text-warn font-bold" aria-label="Look again">?</span>
+                ) : !m ? (
+                  <span className="text-muted-foreground" aria-label="Not checked yet">…</span>
+                ) : null}
+              </span>
+              <div className={cn("min-w-0 flex-1 overflow-x-auto", !l.handwritten && "text-muted-foreground")}>
+                <TeX math={l.latex} />
+              </div>
+              {m?.solved && <span className="text-ok text-xs font-semibold">Done!</span>}
+            </li>
+          );
+        })}
+      </ol>
+      {desk.marks.find((m, i) => m?.status === "look_here" && m.note && desk.lines[i]?.latex === m.latex) && (
+        <p className="text-warn mt-2 text-sm">{desk.marks.find((m, i) => m?.status === "look_here" && m.note && desk.lines[i]?.latex === m.latex)!.note}</p>
+      )}
+      {showTiming && t && (
+        <p className="text-muted-foreground mt-2 text-xs">
+          Last photo: reading {secs(t.readMs)} · math check {t.engineMs} ms · tutor {t.tutorMs === null ? "not needed" : secs(t.tutorMs)}
+        </p>
+      )}
+    </section>
   );
 }

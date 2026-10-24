@@ -64,6 +64,8 @@ export function StationView() {
   const [banner, setBanner] = useState<string | null>(null);
   const lastTouch = useRef(0);
   const spokenTurn = useRef<number | null>(null);
+  /** Finished problems already celebrated (null until the first state arrives, so old ones aren't). */
+  const celebrated = useRef<Set<string> | null>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
@@ -143,6 +145,15 @@ export function StationView() {
           // Speak replies that arrive while watching, not the one already there when the screen wakes.
           if (spokenTurn.current !== null) speak(reply.say, s.active!.kid);
           spokenTurn.current = reply.turnId;
+        }
+        if (s.active) {
+          const done = s.active.desk.marks.flatMap((m, i) => (m?.solved && m.latex ? [`${s.active!.sessionId}:${i}:${m.latex}`] : []));
+          if (celebrated.current === null) celebrated.current = new Set(done);
+          else if (done.some((k) => !celebrated.current!.has(k))) {
+            done.forEach((k) => celebrated.current!.add(k));
+            setBanner("✓ That one's done!");
+            if (!s.active.lastReply || s.active.lastReply.turnId === spokenTurn.current) speak(`Nice, ${s.active.kid.name}. That one's done.`, s.active.kid);
+          }
         }
         if (s.nudge && s.active) {
           setBanner("Stuck? Tap Hint, or keep going.");
@@ -293,7 +304,7 @@ export function StationView() {
             ) : issue ? (
               <p>
                 <span className="text-warn font-semibold">Look again: </span>
-                {issue.note || a.lastReply?.say}
+                {issue.note || (a.busy ? "that line doesn't follow from the one above it. Thinking of a hint…" : "that line doesn't follow from the one above it.")}
               </p>
             ) : a.lastReply?.say ? (
               <p>{a.lastReply.say}</p>
