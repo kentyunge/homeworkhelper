@@ -132,6 +132,6 @@ journalctl -u homework-station -f  # the station's log: photos sent, errors
 ```
 
 **No sound.**
-Right-click the speaker icon in the desktop's top bar (or use `wpctl status` and `wpctl set-default <id>` over SSH) to pick the USB speaker or headphone jack. For natural voices, choose ElevenLabs on each kid's settings page. Otherwise the station uses a robotic built-in voice.
+First tap **Test voice** under the clock on the station's screen. Over SSH, `spd-say "hello"` tests the speaker and the built-in voice without the browser. If neither makes a sound, pick the right output: right-click the speaker icon in the desktop's top bar (or use `wpctl status` and `wpctl set-default <id>` over SSH) to pick the USB speaker or headphone jack. For natural voices, choose ElevenLabs on each kid's settings page. Otherwise the station uses a robotic built-in voice.
 
 **Updating the station software.** Run the install command again. It keeps your pairing and settings.
