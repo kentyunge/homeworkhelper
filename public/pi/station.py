@@ -45,6 +45,21 @@ def load_env():
 
 load_env()
 
+
+def use_desktop_audio():
+    """
+    The station runs as a background service, which doesn't automatically see the desktop's sound
+    system (PipeWire). Without it, audio tools open the sound card directly and lock everyone else out.
+    Point them at the logged-in user's PipeWire instead.
+    """
+    runtime = f"/run/user/{os.getuid()}"
+    os.environ.setdefault("XDG_RUNTIME_DIR", runtime)
+    os.environ.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime}/bus")
+    os.environ.setdefault("PULSE_SERVER", f"unix:{runtime}/pulse/native")
+
+
+use_desktop_audio()
+
 APP_URL = os.environ.get("APP_URL", "").rstrip("/")
 TOKEN_FILE = Path(os.environ.get("TOKEN_FILE", HOME / "token"))
 ROTATE = int(os.environ.get("ROTATE", "0"))  # degrees clockwise to rotate photos: 0, 90, 180, 270
@@ -283,14 +298,25 @@ def default_output():
 
 
 def player():
-    for cmd in ("pw-play", "paplay", "aplay"):
+    # Only players that go through PipeWire; plain aplay would take over the sound card.
+    for cmd in ("pw-play", "paplay"):
         if shutil.which(cmd):
             return cmd
-    return "aplay"
+    return "pw-play"
+
+
+def audio_problem():
+    """Why sound can't play right now, or None. Checked before playing anything."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not (os.path.exists(f"{runtime}/pipewire-0") or os.path.exists(f"{runtime}/pulse/native")):
+        return "The Pi's sound system (PipeWire) isn't running for this user. Rerun the installer and restart."
+    return None
 
 
 def play_tone():
     """A half-second tone, to test the speaker without any voice involved."""
+    if audio_problem():
+        return audio_problem()
     rate = 22050
     t = np.arange(int(rate * 0.5)) / rate
     fade = np.minimum(1, np.minimum(t, t[::-1]) * 40)
@@ -309,6 +335,8 @@ def play_tone():
 
 
 def say_builtin(text):
+    if audio_problem():
+        return audio_problem()
     return run_quiet(["spd-say", "-w", "-l", "en", text], timeout=30)
 
 
@@ -317,7 +345,10 @@ def play_mp3(data):
         f.write(data)
         path = f.name
     try:
-        return run_quiet(["mpg123", "-q", path], timeout=60)
+        if audio_problem():
+            return audio_problem()
+        # "-o pulse" plays through PipeWire (never straight to the sound card).
+        return run_quiet(["mpg123", "-q", "-o", "pulse", path], timeout=60)
     finally:
         os.unlink(path)
 

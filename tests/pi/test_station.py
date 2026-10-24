@@ -102,6 +102,26 @@ class SoundTest(unittest.TestCase):
         self.assertIn("failed", station.run_quiet(["false"], timeout=5))
         self.assertIn("didn't finish", station.run_quiet(["sleep", "3"], timeout=1))
 
+    def test_explains_when_the_sound_system_is_missing(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            old = os.environ.get("XDG_RUNTIME_DIR")
+            os.environ["XDG_RUNTIME_DIR"] = d
+            try:
+                self.assertIn("isn't running", station.audio_problem())
+                self.assertIn("isn't running", station.play_tone())
+                open(f"{d}/pipewire-0", "w").close()
+                self.assertIsNone(station.audio_problem())
+            finally:
+                if old is None:
+                    del os.environ["XDG_RUNTIME_DIR"]
+                else:
+                    os.environ["XDG_RUNTIME_DIR"] = old
+
+    def test_never_uses_aplay(self):
+        self.assertIn(station.player(), ("pw-play", "paplay"))
+
     def test_speaker_says_each_thing_once(self):
         said = []
         sp = station.Speaker(api=None)
