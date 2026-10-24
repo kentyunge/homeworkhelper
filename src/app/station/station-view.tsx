@@ -44,6 +44,42 @@ function readToken(): string | null {
   }
 }
 
+/**
+ * The browser's voices. Chromium on Linux loads them a moment after the page first asks, so wait for
+ * them (up to a few seconds) instead of assuming there are none.
+ */
+function loadVoices(timeoutMs = 3000): Promise<SpeechSynthesisVoice[]> {
+  if (typeof speechSynthesis === "undefined") return Promise.resolve([]);
+  const now = speechSynthesis.getVoices();
+  if (now.length) return Promise.resolve(now);
+  return new Promise((resolve) => {
+    const done = () => {
+      speechSynthesis.removeEventListener("voiceschanged", done);
+      clearTimeout(timer);
+      resolve(speechSynthesis.getVoices());
+    };
+    speechSynthesis.addEventListener("voiceschanged", done);
+    const timer = setTimeout(done, timeoutMs);
+  });
+}
+
+/** Speak with the browser's built-in voice. Resolves with an error message, or null when it played. */
+async function speakBuiltIn(text: string, voiceName?: string): Promise<string | null> {
+  if (typeof speechSynthesis === "undefined") return "This browser can't speak.";
+  const voices = (await loadVoices()).filter((v) => v.lang.toLowerCase().startsWith("en"));
+  return new Promise((resolve) => {
+    const u = new SpeechSynthesisUtterance(text);
+    const v = voices.find((x) => x.name === voiceName) ?? voices[0];
+    if (v) u.voice = v;
+    // If the speech service never reports back, don't leave the orb "talking" forever.
+    const timer = setTimeout(() => resolve(null), 4000 + text.length * 90);
+    u.onend = () => (clearTimeout(timer), resolve(null));
+    u.onerror = (e) => (clearTimeout(timer), resolve(`Speech failed (${e.error})`));
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  });
+}
+
 class StationError extends Error {
   constructor(
     public status: number,
@@ -74,6 +110,7 @@ export function StationView() {
     setToken(readToken());
     setReady(true);
     lastTouch.current = Date.now();
+    loadVoices(); // start loading voices now, so the first reply isn't silent
     audio.current = new Audio();
   }, []);
 
@@ -115,16 +152,8 @@ export function StationView() {
             return;
           }
         }
-        if (typeof speechSynthesis === "undefined") return;
-        await new Promise<void>((resolve) => {
-          const u = new SpeechSynthesisUtterance(text);
-          const voices = speechSynthesis.getVoices().filter((v) => v.lang.toLowerCase().startsWith("en"));
-          const v = voices.find((x) => x.name === voice?.voiceId) ?? voices[0];
-          if (v) u.voice = v;
-          u.onend = u.onerror = () => resolve();
-          speechSynthesis.cancel();
-          speechSynthesis.speak(u);
-        });
+        const problem = await speakBuiltIn(text, voice?.voiceId);
+        if (problem) console.warn("[station] built-in voice:", problem);
       } finally {
         setSpeaking(false);
       }
@@ -269,15 +298,20 @@ export function StationView() {
           asleep={asleep}
           onPick={(k) => (touch(), setPinFor(k))}
           banner={banner}
-          onTestVoice={() => {
+          onTestVoice={async () => {
             touch();
-            const voices = typeof speechSynthesis === "undefined" ? [] : speechSynthesis.getVoices();
-            if (!voices.length) {
-              setBanner("No voice found. Update the station (rerun the installer) and restart it.");
-              return;
-            }
             setBanner("Playing a test…");
-            speak(`Hi, this is ${state.station.name}. If you can hear me, the voice works.`);
+            setSpeaking(true);
+            const voices = await loadVoices();
+            const problem = await speakBuiltIn(`Hi, this is ${state.station.name}. If you can hear me, the voice works.`);
+            setSpeaking(false);
+            setBanner(
+              problem
+                ? `${problem}. Rerun the installer and restart the station.`
+                : voices.length
+                  ? `Played with ${voices.length} voice${voices.length === 1 ? "" : "s"} available. Didn't hear it? Check the speaker output.`
+                  : "The browser lists no voices, so this used its default. Didn't hear it? Rerun the installer and restart.",
+            );
           }}
         />
       </Shell>
