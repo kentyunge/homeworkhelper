@@ -64,6 +64,10 @@ Wants=network-online.target
 
 [Service]
 User=$USER
+# Use the desktop's sound system (PipeWire) rather than opening the sound card directly.
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u)
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+Environment=PULSE_SERVER=unix:/run/user/$(id -u)/pulse/native
 ExecStart=/usr/bin/python3 $DIR/station.py
 Restart=always
 RestartSec=5
@@ -71,6 +75,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNIT
+# Start this user's sound system at boot, not only once the desktop has signed in.
+sudo loginctl enable-linger "$USER"
 sudo systemctl daemon-reload
 sudo systemctl enable homework-station
 sudo systemctl restart homework-station
