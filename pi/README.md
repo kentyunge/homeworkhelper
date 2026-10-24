@@ -131,6 +131,16 @@ rpicam-still -o test.jpg           # takes a photo
 journalctl -u homework-station -f  # the station's log: photos sent, errors
 ```
 
+**No sound, or sound that works and then stops.**
+Tap **Sound check** under the clock: the Pi plays a tone, the built-in voice and the natural voice, and says which output it used. If sound stopped working altogether (even `spd-say "hello"` over SSH is silent), the sound system is probably stuck. Over SSH:
+```bash
+fuser -v /dev/snd/*                                        # which programs hold the sound device
+systemctl --user restart pipewire pipewire-pulse wireplumber
+pkill speech-dispatch                                       # restarts on its own next time it's needed
+wpctl status                                                # the * marks the default output under Sinks
+```
+If `wpctl status` shows the wrong output starred, run `wpctl set-default <its number>`.
+
 **No sound.**
 First tap **Test voice** under the clock on the station's screen. Over SSH, `spd-say "hello"` tests the speaker and the built-in voice without the browser. If neither makes a sound, pick the right output: right-click the speaker icon in the desktop's top bar (or use `wpctl status` and `wpctl set-default <id>` over SSH) to pick the USB speaker or headphone jack. For natural voices, choose ElevenLabs on each kid's settings page. Otherwise the station uses a robotic built-in voice.
 

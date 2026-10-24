@@ -95,5 +95,26 @@ class ProblemsTest(unittest.TestCase):
         self.assertIn("isn't working", station.camera_problem(RuntimeError("weird")))
 
 
+class SoundTest(unittest.TestCase):
+    def test_run_quiet_explains_failures(self):
+        self.assertIsNone(station.run_quiet(["true"], timeout=5))
+        self.assertIn("isn't installed", station.run_quiet(["no-such-player-xyz"], timeout=5))
+        self.assertIn("failed", station.run_quiet(["false"], timeout=5))
+        self.assertIn("didn't finish", station.run_quiet(["sleep", "3"], timeout=1))
+
+    def test_speaker_says_each_thing_once(self):
+        said = []
+        sp = station.Speaker(api=None)
+        sp.say = lambda speech: said.append(speech["text"])
+        sp.handle({"id": 1, "text": "hello", "provider": "browser"})
+        sp.thread.join()
+        sp.handle({"id": 1, "text": "hello", "provider": "browser"})
+        sp.handle(None)
+        self.assertEqual(said, ["hello"])
+        sp.handle({"id": 2, "text": "next", "provider": "browser"})
+        sp.thread.join()
+        self.assertEqual(said, ["hello", "next"])
+
+
 if __name__ == "__main__":
     unittest.main()

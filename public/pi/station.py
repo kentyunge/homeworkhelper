@@ -12,11 +12,17 @@ photo to the app only when new writing has appeared and the page has been still 
 Settings come from ~/.homework-station/station.env (written by the installer).
 """
 
+import glob
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import threading
 import time
+import wave
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -53,6 +59,7 @@ INK_FRACTION = 0.0012  # share of pixels that must change to count as new writin
 MIN_UPLOAD_GAP_S = 4.0
 AWAKE_AFTER_MOTION_S = 10 * 60  # keep asking the app for instructions this long after movement
 POLL_ACTIVE_S = 3.0
+POLL_WATCHING_S = 1.5  # faster while someone's working, so replies are spoken promptly
 POLL_PAIRING_S = 5.0
 
 
@@ -67,6 +74,23 @@ class Api:
     def __init__(self, base, token=None):
         self.base = base
         self.token = token
+
+    def fetch(self, method, path, timeout=60):
+        """Raw bytes (e.g. audio). Raises RuntimeError with the app's error message on failure."""
+        headers = {"user-agent": "homework-station/1"}
+        if self.token:
+            headers["authorization"] = f"Bearer {self.token}"
+        req = urllib.request.Request(self.base + path, data=b"" if method == "POST" else None, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                return res.read()
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode(errors="replace")
+            try:
+                message = json.loads(raw).get("error") or raw[:300]
+            except Exception:
+                message = raw[:300]
+            raise RuntimeError(message) from None
 
     def request(self, method, path, body=None, content_type=None, timeout=30):
         headers = {"user-agent": "homework-station/1"}
@@ -224,6 +248,159 @@ class Watcher:
         self.reference = None
 
 
+# ---------------------------------------------------------------- sound
+# The Pi's own audio (PipeWire) works even when the kiosk browser's sound doesn't, so the station
+# speaks from here: ElevenLabs MP3s through mpg123, otherwise the built-in voice through spd-say.
+
+
+def run_quiet(cmd, timeout):
+    """Run a command; return an error message, or None if it worked."""
+    if not shutil.which(cmd[0]):
+        return f"{cmd[0]} isn't installed. Rerun the installer."
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return f"{cmd[0]} didn't finish within {timeout} seconds (the audio output may be stuck)"
+    if result.returncode != 0:
+        detail = result.stderr.decode(errors="replace").strip().splitlines()
+        return f"{cmd[0]} failed: {detail[-1] if detail else f'exit code {result.returncode}'}"
+    return None
+
+
+def default_output():
+    """The name of the speaker PipeWire plays to by default (e.g. 'USB Audio' or 'Built-in Audio'), or None."""
+    if not shutil.which("wpctl"):
+        return None
+    try:
+        out = subprocess.run(["wpctl", "inspect", "@DEFAULT_AUDIO_SINK@"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    for key in ("node.description", "node.nick", "node.name"):
+        for line in out.splitlines():
+            if key in line and "=" in line:
+                return line.split("=", 1)[1].strip().strip('"')
+    return None
+
+
+def player():
+    for cmd in ("pw-play", "paplay", "aplay"):
+        if shutil.which(cmd):
+            return cmd
+    return "aplay"
+
+
+def play_tone():
+    """A half-second tone, to test the speaker without any voice involved."""
+    rate = 22050
+    t = np.arange(int(rate * 0.5)) / rate
+    fade = np.minimum(1, np.minimum(t, t[::-1]) * 40)
+    samples = (np.sin(2 * np.pi * 660 * t) * fade * 12000).astype(np.int16)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        path = f.name
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(samples.tobytes())
+    try:
+        return run_quiet([player(), path], timeout=10)
+    finally:
+        os.unlink(path)
+
+
+def say_builtin(text):
+    return run_quiet(["spd-say", "-w", "-l", "en", text], timeout=30)
+
+
+def play_mp3(data):
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        f.write(data)
+        path = f.name
+    try:
+        return run_quiet(["mpg123", "-q", path], timeout=60)
+    finally:
+        os.unlink(path)
+
+
+class Speaker:
+    """Speaks one thing at a time in the background, so the camera keeps watching."""
+
+    def __init__(self, api):
+        self.api = api
+        self.last_id = None
+        self.thread = None
+
+    def handle(self, speech):
+        if not speech or speech.get("id") == self.last_id:
+            return
+        self.last_id = speech["id"]
+        if self.thread and self.thread.is_alive():
+            return  # still talking; this one is skipped rather than talking over itself
+        self.thread = threading.Thread(target=self.say, args=(speech,), daemon=True)
+        self.thread.start()
+
+    def say(self, speech):
+        text = speech.get("text", "")
+        if speech.get("provider") == "elevenlabs":
+            try:
+                problem = play_mp3(self.api.fetch("GET", f"/api/v1/station/speech/{speech['id']}"))
+                if not problem:
+                    return
+                log("Natural voice failed:", problem)
+            except Exception as e:
+                log("Natural voice failed, using the built-in voice:", e)
+        problem = say_builtin(text)
+        if problem:
+            log("Built-in voice failed:", problem)
+
+
+def sound_check(api, check_id, name):
+    """Test the speaker, the built-in voice and ElevenLabs, and report each result to the screen."""
+    results = []
+
+    def add(label, problem, ok_text):
+        results.append({"name": label, "ok": problem is None, "detail": problem or ok_text})
+        log(f"Sound check, {label}:", problem or "ok")
+
+    output = default_output()
+    tone = play_tone()
+    if tone and "didn't finish" in tone:
+        tone += ". Another program may be holding the sound device: see 'No sound' in the setup guide."
+    add("Speaker", tone, f"Played a tone through: {output}." if output else "Played a tone (couldn't tell which output).")
+    add("Built-in voice", say_builtin(f"Hi, this is {name}. This is the built-in voice."), "Spoke with the built-in voice.")
+    try:
+        audio = api.fetch("POST", "/api/v1/station/voice-test")
+        add("Natural voice (ElevenLabs)", play_mp3(audio), "Played a natural voice clip.")
+    except Exception as e:
+        add("Natural voice (ElevenLabs)", str(e), "")
+    try:
+        api.request("POST", "/api/v1/station/sound-check/results", {"id": check_id, "results": results})
+    except Exception as e:
+        log("Couldn't report sound check:", e)
+
+
+class TouchWatcher:
+    """Notices taps on the touchscreen (any input device), so a tap wakes the station like movement does."""
+
+    def __init__(self):
+        self.files = []
+        for path in glob.glob("/dev/input/event*"):
+            try:
+                self.files.append(os.open(path, os.O_RDONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+
+    def touched(self):
+        hit = False
+        for fd in self.files:
+            try:
+                while os.read(fd, 4096):
+                    hit = True
+            except (BlockingIOError, OSError):
+                pass
+        return hit
+
+
 # ---------------------------------------------------------------- main loop
 
 
@@ -289,6 +466,9 @@ def run(source):
 
     camera = open_with_retries()
     watcher = Watcher()
+    speaker = Speaker(api)
+    touch = TouchWatcher()
+    checks_done = set()
     sending = Backoff()
     polling = Backoff(first=5.0)
     state = {"approved": False, "watching": False, "captureRequested": False}
@@ -307,10 +487,13 @@ def run(source):
             camera = open_with_retries()
             continue
         watcher.look(view, now)
+        if touch.touched():
+            watcher.last_motion = now  # a tap on the screen wakes the station too
+            next_poll = min(next_poll, now)
 
         # Ask the app what to do only when someone's at the desk (or pairing), so an empty kitchen costs nothing.
         awake = now - watcher.last_motion < AWAKE_AFTER_MOTION_S or state["watching"]
-        interval = POLL_PAIRING_S if not state["approved"] else POLL_ACTIVE_S
+        interval = POLL_PAIRING_S if not state["approved"] else POLL_WATCHING_S if state["watching"] else POLL_ACTIVE_S
         if (awake or not state["approved"]) and now >= next_poll and polling.ready(now):
             next_poll = now + interval
             try:
@@ -323,6 +506,11 @@ def run(source):
                 if state["watching"] and not new_state.get("watching"):
                     log("Watching stopped")
                 state = new_state
+                speaker.handle(state.get("speech"))
+                check = state.get("soundCheck")
+                if check and check["id"] not in checks_done:
+                    checks_done.add(check["id"])
+                    threading.Thread(target=sound_check, args=(api, check["id"], "the desk station"), daemon=True).start()
             except Exception as e:
                 log(f"Couldn't check in (trying again in {polling.failed(now):.0f}s):", e)
                 if "-> 401" in str(e):

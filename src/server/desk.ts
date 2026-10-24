@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import { and, desc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { verifyPassword } from "better-auth/crypto";
 import { db } from "@/db";
-import { account, kids, stations, turns, tutorSessions, type DeskState, type LineMark, type PageLine } from "@/db/schema";
+import { account, kids, stations, turns, tutorSessions, type SoundCheckResult, type StationSpeech, type DeskState, type LineMark, type PageLine } from "@/db/schema";
 import type { TutorReply } from "@/lib/tutor-reply";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "./errors";
 import { compareLines, isSolutionLine } from "@/lib/math-check";
@@ -477,6 +477,7 @@ export async function stationState(station: Station) {
   const base = {
     station: { name: station.name, approved: !!station.approvedAt, pairCode: station.pairCode },
     problems: problems(station),
+    soundCheck: station.soundCheck,
   };
   if (!station.approvedAt) return { ...base, kids: [], active: null };
   if (!station.activeSessionId) {
@@ -516,13 +517,70 @@ export async function stationState(station: Station) {
   };
 }
 
-/** What the camera program needs: whether to send photos, and whether one was asked for. */
+/** Speech older than this is dropped rather than played late. */
+const SPEECH_FRESH_MS = 60_000;
+
+/**
+ * What the Pi program needs: whether to send photos, whether one was asked for, anything to say,
+ * and a sound check to run.
+ */
 export function cameraState(station: Station) {
+  const speech = station.speech && Date.now() - new Date(station.speech.at).getTime() < SPEECH_FRESH_MS ? station.speech : null;
+  const check = station.soundCheck;
+  const soundCheck = check && !check.results && Date.now() - new Date(check.requestedAt).getTime() < 2 * 60_000 ? { id: check.id } : null;
   return {
     approved: !!station.approvedAt,
     watching: !!station.activeSessionId && !station.paused,
     captureRequested: station.captureRequested,
+    speech,
+    soundCheck,
   };
+}
+
+/**
+ * Something for the station to say out loud. The Pi plays it through its own speaker (system audio
+ * works there; the kiosk browser's sound may not), in the watched kid's voice when there is one.
+ */
+export async function queueSpeech(station: Station, text: string) {
+  requireApproved(station);
+  const clean = text.trim().slice(0, 1000);
+  if (!clean) return null;
+  let provider: StationSpeech["provider"] = "browser";
+  let voiceId = "";
+  if (station.activeSessionId) {
+    const [row] = await db
+      .select({ provider: kids.voiceProvider, voiceId: kids.voiceId })
+      .from(tutorSessions)
+      .innerJoin(kids, eq(kids.id, tutorSessions.kidId))
+      .where(eq(tutorSessions.id, station.activeSessionId));
+    if (row) {
+      provider = row.provider === "elevenlabs" ? "elevenlabs" : "browser";
+      voiceId = row.voiceId;
+    }
+  }
+  const speech: StationSpeech = { id: Date.now(), text: clean, provider, voiceId, at: new Date().toISOString() };
+  await db.update(stations).set({ speech }).where(eq(stations.id, station.id));
+  return speech;
+}
+
+export function currentSpeech(station: Station, id: number) {
+  if (!station.speech || station.speech.id !== id) throw notFound("That speech has been replaced");
+  return station.speech;
+}
+
+/** Ask the Pi to test its speaker, built-in voice and ElevenLabs. */
+export async function requestSoundCheck(station: Station) {
+  const soundCheck = { id: Date.now(), requestedAt: new Date().toISOString(), results: null, finishedAt: null };
+  await db.update(stations).set({ soundCheck }).where(eq(stations.id, station.id));
+  return soundCheck;
+}
+
+export async function saveSoundCheck(station: Station, id: number, results: SoundCheckResult[]) {
+  if (!station.soundCheck || station.soundCheck.id !== id) throw notFound("That sound check has been replaced");
+  await db
+    .update(stations)
+    .set({ soundCheck: { ...station.soundCheck, results, finishedAt: new Date().toISOString() } })
+    .where(eq(stations.id, station.id));
 }
 
 /** Stations a kid can pick from the Chromebook, and the one (if any) watching this conversation. */

@@ -310,6 +310,31 @@ api.get("/station/snapshots/:id", async (c) => {
   return new Response(new Uint8Array(u.data), { headers: { "content-type": u.mediaType, "cache-control": "private, max-age=3600" } });
 });
 
+/** The station's screen asks for something to be said; the Pi plays it. */
+api.post("/station/say", async (c) => {
+  const s = await stationOf(c);
+  const { text } = await body(c, z.object({ text: z.string().max(1000) }));
+  return c.json({ speech: await desk.queueSpeech(s, text) });
+});
+
+/** The Pi fetches ElevenLabs audio for a queued speech. */
+api.get("/station/speech/:id", async (c) => {
+  const sp = desk.currentSpeech(await stationOf(c), Number(c.req.param("id")));
+  return elevenLabsSpeech(sp.text, sp.voiceId);
+});
+
+api.post("/station/sound-check", async (c) => c.json(await desk.requestSoundCheck(await stationOf(c))));
+
+api.post("/station/sound-check/results", async (c) => {
+  const s = await stationOf(c);
+  const { id, results } = await body(
+    c,
+    z.object({ id: z.number(), results: z.array(z.object({ name: z.string().max(60), ok: z.boolean(), detail: z.string().max(500) })).max(5) }),
+  );
+  await desk.saveSoundCheck(s, id, results);
+  return c.json({ ok: true });
+});
+
 /**
  * Sound check: a short ElevenLabs clip, without needing a session. Uses the watched kid's voice, else the
  * first kid set to ElevenLabs, else ELEVENLABS_DEFAULT_VOICE_ID.

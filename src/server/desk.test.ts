@@ -143,7 +143,7 @@ describe("starting at the station", () => {
 
   it("tells the camera to start, and the Chromebook can attach and stop it", async () => {
     const { token, sessionId } = await watching();
-    expect(desk.cameraState(await station(token))).toEqual({ approved: true, watching: true, captureRequested: false });
+    expect(desk.cameraState(await station(token))).toEqual({ approved: true, watching: true, captureRequested: false, speech: null, soundCheck: null });
     expect((await desk.stationsForSession(sessionId)).find((s) => s.watchingThis)).toBeTruthy();
     await desk.stopForSession(sessionId);
     expect(desk.cameraState(await station(token)).watching).toBe(false);
@@ -324,6 +324,40 @@ describe("problems", () => {
     expect((await desk.stationState(await station(token))).problems.camera).toMatch(/ribbon cable/);
     await desk.reportCamera(await station(token), null);
     expect((await desk.stationState(await station(token))).problems.camera).toBeNull();
+  });
+});
+
+describe("speaking through the Pi", () => {
+  it("queues what to say, in the watched kid's voice, for the Pi to pick up once", async () => {
+    const { kid, token } = await watching();
+    const { updateKid } = await import("./family");
+    await updateKid(kid.id, { voiceProvider: "elevenlabs", voiceId: "voice-123" });
+    const sp = await desk.queueSpeech(await station(token), "  Nice work.  ");
+    expect(sp).toMatchObject({ text: "Nice work.", provider: "elevenlabs", voiceId: "voice-123" });
+    expect(desk.cameraState(await station(token)).speech?.id).toBe(sp!.id);
+    expect(desk.currentSpeech(await station(token), sp!.id).text).toBe("Nice work.");
+    expect(() => desk.currentSpeech({ speech: sp } as never, sp!.id + 1)).toThrow(/replaced/);
+    expect(await desk.queueSpeech(await station(token), "   ")).toBeNull();
+  });
+
+  it("drops speech that's too old to be useful", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const token = await pairedStation();
+    await desk.queueSpeech(await station(token), "Hello");
+    expect(desk.cameraState(await station(token)).speech?.provider).toBe("browser");
+    vi.setSystemTime(Date.now() + 61_000);
+    expect(desk.cameraState(await station(token)).speech).toBeNull();
+  });
+
+  it("asks the Pi for a sound check and shows its results on the screen", async () => {
+    const token = await pairedStation();
+    const check = await desk.requestSoundCheck(await station(token));
+    expect(desk.cameraState(await station(token)).soundCheck).toEqual({ id: check.id });
+    const results = [{ name: "Speaker", ok: true, detail: "Played a tone." }];
+    await desk.saveSoundCheck(await station(token), check.id, results);
+    expect(desk.cameraState(await station(token)).soundCheck).toBeNull(); // done: not run again
+    expect((await desk.stationState(await station(token))).soundCheck?.results).toEqual(results);
+    await expect(desk.saveSoundCheck(await station(token), check.id + 1, results)).rejects.toThrow(/replaced/);
   });
 });
 

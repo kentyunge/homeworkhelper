@@ -22,6 +22,13 @@
       "when": 1792719614182,
       "tag": "0002_station_problems",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792853680812,
+      "tag": "0003_station_speech",
+      "breakpoints": true
     }
   ]
 }
