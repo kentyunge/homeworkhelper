@@ -24,6 +24,7 @@ type State = {
   kids: KidOption[];
   active: Active | null;
   nudge?: boolean;
+  soundCheck: { id: number; results: { name: string; ok: boolean; detail: string }[] | null } | null;
 };
 
 const TOKEN_KEY = "station-token";
@@ -42,86 +43,6 @@ function readToken(): string | null {
   } catch {
     return null;
   }
-}
-
-/**
- * The browser's voices. Chromium on Linux loads them a moment after the page first asks, so wait for
- * them (up to a few seconds) instead of assuming there are none.
- */
-function loadVoices(timeoutMs = 3000): Promise<SpeechSynthesisVoice[]> {
-  if (typeof speechSynthesis === "undefined") return Promise.resolve([]);
-  const now = speechSynthesis.getVoices();
-  if (now.length) return Promise.resolve(now);
-  return new Promise((resolve) => {
-    const done = () => {
-      speechSynthesis.removeEventListener("voiceschanged", done);
-      clearTimeout(timer);
-      resolve(speechSynthesis.getVoices());
-    };
-    speechSynthesis.addEventListener("voiceschanged", done);
-    const timer = setTimeout(done, timeoutMs);
-  });
-}
-
-/** Speak with the browser's built-in voice. Resolves with an error message, or null when it played. */
-async function speakBuiltIn(text: string, voiceName?: string): Promise<string | null> {
-  if (typeof speechSynthesis === "undefined") return "This browser can't speak.";
-  const voices = (await loadVoices()).filter((v) => v.lang.toLowerCase().startsWith("en"));
-  return new Promise((resolve) => {
-    const u = new SpeechSynthesisUtterance(text);
-    const v = voices.find((x) => x.name === voiceName) ?? voices[0];
-    if (v) u.voice = v;
-    // If the speech service never reports back, don't leave the orb "talking" forever.
-    const timer = setTimeout(() => resolve(null), 4000 + text.length * 90);
-    u.onend = () => (clearTimeout(timer), resolve(null));
-    u.onerror = (e) => (clearTimeout(timer), resolve(`Speech failed (${e.error})`));
-    speechSynthesis.cancel();
-    speechSynthesis.speak(u);
-  });
-}
-
-/** Play audio from a URL; resolves with an error message, or null when it played to the end. */
-function playAudio(el: HTMLAudioElement, url: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    el.src = url;
-    el.onended = () => resolve(null);
-    el.onerror = () => resolve("The browser couldn't play the sound file");
-    el.play().catch((e: Error) => resolve(e.name === "NotAllowedError" ? "The browser blocked sound (autoplay). Rerun the installer and restart." : `Couldn't play sound: ${e.message}`));
-  });
-}
-
-/** A short tone as a WAV file, to test the speaker without any voice involved. */
-function beepUrl(): string {
-  const rate = 16000;
-  const n = Math.round(rate * 0.5);
-  const bytes = new Uint8Array(44 + n * 2);
-  const v = new DataView(bytes.buffer);
-  const str = (o: number, t: string) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
-  str(0, "RIFF");
-  v.setUint32(4, 36 + n * 2, true);
-  str(8, "WAVEfmt ");
-  v.setUint32(16, 16, true);
-  v.setUint16(20, 1, true);
-  v.setUint16(22, 1, true);
-  v.setUint32(24, rate, true);
-  v.setUint32(28, rate * 2, true);
-  v.setUint16(32, 2, true);
-  v.setUint16(34, 16, true);
-  str(36, "data");
-  v.setUint32(40, n * 2, true);
-  for (let i = 0; i < n; i++) {
-    const fade = Math.min(1, i / 800, (n - i) / 800);
-    v.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * 660 * i) / rate) * 9000 * fade), true);
-  }
-  let bin = "";
-  bytes.forEach((b) => (bin += String.fromCharCode(b)));
-  return `data:audio/wav;base64,${btoa(bin)}`;
-}
-
-/** The server's error message from a failed request. */
-async function errorText(res: Response) {
-  const j = (await res.json().catch(() => ({}))) as { error?: string };
-  return j.error ?? `Request failed (${res.status})`;
 }
 
 class StationError extends Error {
@@ -144,12 +65,12 @@ export function StationView() {
   const [banner, setBanner] = useState<string | null>(null);
   /** The last reason the station couldn't speak, shown until the next sound check. */
   const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
-  const [soundCheck, setSoundCheck] = useState<SoundResult[] | null>(null);
+  /** The sound check this screen asked the Pi to run, and when. */
+  const [soundCheck, setSoundCheck] = useState<{ id: number; startedAt: number } | null>(null);
   const lastTouch = useRef(0);
   const spokenTurn = useRef<number | null>(null);
   /** Finished problems already celebrated (null until the first state arrives, so old ones aren't). */
   const celebrated = useRef<Set<string> | null>(null);
-  const audio = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     // The token lives in the URL (from the Pi's launcher) or this browser's storage; both are client-only.
@@ -157,8 +78,6 @@ export function StationView() {
     setToken(readToken());
     setReady(true);
     lastTouch.current = Date.now();
-    loadVoices(); // start loading voices now, so the first reply isn't silent
-    audio.current = new Audio();
   }, []);
 
   const call = useCallback(
@@ -176,34 +95,23 @@ export function StationView() {
   );
 
   // ---------- voice ----------
+  /**
+   * Say something out loud. The Pi plays it through its own speaker (its system audio works; the kiosk
+   * browser's sound may not), in the kid's voice. The orb shows "talking" for about as long as it takes.
+   */
   const speak = useCallback(
-    async (text: string, voice?: Active["kid"]) => {
+    async (text: string) => {
       if (!text.trim()) return;
-      setSpeaking(true);
       try {
-        if (voice?.voiceProvider === "elevenlabs") {
-          const res = await fetch("/api/v1/station/tts", {
-            method: "POST",
-            headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-            body: JSON.stringify({ text }),
-          });
-          if (res.ok) {
-            const url = URL.createObjectURL(await res.blob());
-            const problem = await playAudio(audio.current!, url);
-            URL.revokeObjectURL(url);
-            if (!problem) return;
-            setVoiceProblem(problem);
-          } else {
-            setVoiceProblem(await errorText(res));
-          }
-        }
-        const problem = await speakBuiltIn(text, voice?.voiceProvider === "elevenlabs" ? undefined : voice?.voiceId);
-        if (problem) setVoiceProblem(`Built-in voice: ${problem}`);
-      } finally {
-        setSpeaking(false);
+        await call("/station/say", { body: { text } });
+        setVoiceProblem(null);
+        setSpeaking(true);
+        setTimeout(() => setSpeaking(false), Math.min(15_000, 1500 + text.length * 65));
+      } catch (e) {
+        setVoiceProblem((e as Error).message);
       }
     },
-    [token],
+    [call],
   );
 
   // ---------- polling ----------
@@ -217,7 +125,7 @@ export function StationView() {
         const reply = s.active?.lastReply;
         if (reply && reply.turnId !== spokenTurn.current) {
           // Speak replies that arrive while watching, not the one already there when the screen wakes.
-          if (spokenTurn.current !== null) speak(reply.say, s.active!.kid);
+          if (spokenTurn.current !== null) speak(reply.say);
           spokenTurn.current = reply.turnId;
         }
         if (s.active) {
@@ -226,12 +134,12 @@ export function StationView() {
           else if (done.some((k) => !celebrated.current!.has(k))) {
             done.forEach((k) => celebrated.current!.add(k));
             setBanner("✓ That one's done!");
-            if (!s.active.lastReply || s.active.lastReply.turnId === spokenTurn.current) speak(`Nice, ${s.active.kid.name}. That one's done.`, s.active.kid);
+            if (!s.active.lastReply || s.active.lastReply.turnId === spokenTurn.current) speak(`Nice, ${s.active.kid.name}. That one's done.`);
           }
         }
         if (s.nudge && s.active) {
           setBanner("Stuck? Tap Hint, or keep going.");
-          speak(`Want a hint, ${s.active.kid.name}? Tap Hint, or keep going.`, s.active.kid);
+          speak(`Want a hint, ${s.active.kid.name}? Tap Hint, or keep going.`);
         }
       } catch (e) {
         setError(e instanceof StationError && e.status === 401 ? "not-paired" : (e as Error).message);
@@ -256,6 +164,13 @@ export function StationView() {
     }, active ? 2500 : 10_000);
     return () => clearInterval(t);
   }, [token, active, refresh]);
+
+  // While a sound check runs, check for its results every second.
+  useEffect(() => {
+    if (!soundCheck) return;
+    const t = setInterval(() => refresh(false), 1000);
+    return () => clearInterval(t);
+  }, [soundCheck, refresh]);
 
   const touch = useCallback(() => {
     lastTouch.current = Date.now();
@@ -338,7 +253,13 @@ export function StationView() {
     }
     return (
       <Shell onTouch={touch}>
-        {soundCheck && <SoundCheck results={soundCheck} onClose={() => setSoundCheck(null)} />}
+        {soundCheck && (
+          <SoundCheck
+            startedAt={soundCheck.startedAt}
+            results={state.soundCheck?.id === soundCheck.id ? state.soundCheck.results : null}
+            onClose={() => setSoundCheck(null)}
+          />
+        )}
         <Idle
           state={state}
           asleep={asleep}
@@ -347,33 +268,12 @@ export function StationView() {
           onTestVoice={async () => {
             touch();
             setVoiceProblem(null);
-            const results: SoundResult[] = [
-              { name: "Speaker", status: "running" },
-              { name: "Built-in voice", status: "waiting" },
-              { name: "Natural voice (ElevenLabs)", status: "waiting" },
-            ];
-            const show = () => setSoundCheck(results.map((r) => ({ ...r })));
-            const done = (i: number, problem: string | null, okText: string) => {
-              results[i] = { ...results[i], status: problem ? "failed" : "ok", detail: problem ?? okText };
-              if (results[i + 1]) results[i + 1].status = "running";
-              show();
-            };
-            show();
-            setSpeaking(true);
-            done(0, await playAudio(audio.current!, beepUrl()), "You should have heard a tone.");
-            const voices = await loadVoices();
-            done(
-              1,
-              await speakBuiltIn(`Hi, this is ${state.station.name}. This is the built-in voice.`),
-              voices.length ? `Spoke with one of ${voices.length} voices.` : "Spoke with the browser's default voice.",
-            );
-            const res = await fetch("/api/v1/station/voice-test", { method: "POST", headers: { authorization: `Bearer ${token}` } });
-            if (res.ok) {
-              const url = URL.createObjectURL(await res.blob());
-              done(2, await playAudio(audio.current!, url), "Played a natural voice clip.");
-              URL.revokeObjectURL(url);
-            } else done(2, await errorText(res), "");
-            setSpeaking(false);
+            try {
+              const { id } = await call<{ id: number }>("/station/sound-check", { body: {} });
+              setSoundCheck({ id, startedAt: Date.now() });
+            } catch (e) {
+              setBanner((e as Error).message);
+            }
           }}
         />
       </Shell>
@@ -697,33 +597,53 @@ function PageView({ desk, token }: { desk: DeskState; token: string }) {
   );
 }
 
-type SoundResult = { name: string; status: "waiting" | "running" | "ok" | "failed"; detail?: string };
-
-/** Results of the sound check: the speaker, the built-in voice, and ElevenLabs, each tested on its own. */
-function SoundCheck({ results, onClose }: { results: SoundResult[]; onClose: () => void }) {
-  const finished = results.every((r) => r.status === "ok" || r.status === "failed");
+/** Results of the sound check the Pi runs: its speaker, the built-in voice, and ElevenLabs, each on its own. */
+function SoundCheck({
+  startedAt,
+  results,
+  onClose,
+}: {
+  startedAt: number;
+  results: { name: string; ok: boolean; detail: string }[] | null;
+  onClose: () => void;
+}) {
+  const [now, setNow] = useState(startedAt);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const waited = Math.round((now - startedAt) / 1000);
+  const gaveUp = !results && waited > 45;
   return (
     <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/70 p-6">
       <div className="bg-card w-full max-w-lg space-y-3 rounded-2xl border border-white/10 p-5">
         <p className="text-lg font-semibold">Sound check</p>
-        {results.map((r) => (
-          <div key={r.name} className="flex gap-3">
-            <span className="w-6 shrink-0 text-center text-lg">
-              {r.status === "ok" ? "✓" : r.status === "failed" ? "✗" : r.status === "running" ? "…" : ""}
-            </span>
-            <div className="min-w-0">
-              <p className={cn("font-medium", r.status === "ok" && "text-ok", r.status === "failed" && "text-destructive")}>{r.name}</p>
-              {r.detail && <p className="text-muted-foreground text-sm">{r.detail}</p>}
-            </div>
-          </div>
-        ))}
-        {finished && (
-          <p className="text-muted-foreground text-xs">
-            A ✓ means the browser played it. If you heard nothing for a ✓, the sound is going to a different output: see &ldquo;No sound&rdquo; in pi/README.md.
+        {results ? (
+          <>
+            {results.map((r) => (
+              <div key={r.name} className="flex gap-3">
+                <span className={cn("w-6 shrink-0 text-center text-lg", r.ok ? "text-ok" : "text-destructive")}>{r.ok ? "✓" : "✗"}</span>
+                <div className="min-w-0">
+                  <p className={cn("font-medium", r.ok ? "text-ok" : "text-destructive")}>{r.name}</p>
+                  <p className="text-muted-foreground text-sm">{r.detail}</p>
+                </div>
+              </div>
+            ))}
+            <p className="text-muted-foreground text-xs">
+              A ✓ means the Pi played it. If you heard nothing for a ✓, check the speaker&apos;s volume and output (&ldquo;No sound&rdquo; in pi/README.md).
+            </p>
+          </>
+        ) : gaveUp ? (
+          <p className="text-destructive text-sm">
+            The Pi&apos;s station program didn&apos;t answer. Rerun the installer, then over SSH check its log: journalctl -u homework-station -n 30
+          </p>
+        ) : (
+          <p className="text-muted-foreground text-sm">
+            Playing a tone, then the built-in voice, then the natural voice through the Pi&apos;s speaker… ({waited} s)
           </p>
         )}
-        <button type="button" onClick={onClose} className="bg-primary text-primary-foreground w-full rounded-xl py-3 font-semibold disabled:opacity-50" disabled={!finished}>
-          {finished ? "Close" : "Testing…"}
+        <button type="button" onClick={onClose} className="bg-primary text-primary-foreground w-full rounded-xl py-3 font-semibold">
+          {results || gaveUp ? "Close" : "Cancel"}
         </button>
       </div>
     </div>

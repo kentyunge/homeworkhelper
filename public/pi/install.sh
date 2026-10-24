@@ -22,8 +22,8 @@ echo "==> Installing packages (a few minutes)"
 sudo apt-get update
 CHROMIUM=chromium
 apt-cache show chromium >/dev/null 2>&1 || CHROMIUM=chromium-browser
-sudo apt-get install -y python3-picamera2 python3-numpy python3-pil "$CHROMIUM" speech-dispatcher espeak-ng rpicam-apps || \
-  sudo apt-get install -y python3-picamera2 python3-numpy python3-pil "$CHROMIUM" speech-dispatcher espeak-ng
+sudo apt-get install -y python3-picamera2 python3-numpy python3-pil "$CHROMIUM" speech-dispatcher espeak-ng mpg123 rpicam-apps || \
+  sudo apt-get install -y python3-picamera2 python3-numpy python3-pil "$CHROMIUM" speech-dispatcher espeak-ng mpg123
 
 echo "==> Checking the camera"
 if ! /usr/bin/python3 -c "import picamera2" 2>/dev/null; then
