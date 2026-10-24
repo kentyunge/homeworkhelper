@@ -74,8 +74,27 @@ export const tutorSessions = pgTable(
 export type KidContent = { text: string; uploadIds: number[]; source?: "desk"; snapshotId?: number };
 
 /** One line of handwriting read from the desk camera. Positions are fractions of the photo (0-1). */
-export type PageLine = { latex: string; handwritten: boolean; y: number; x0: number; x1: number };
-export type LineMark = { latex: string; status: "ok" | "look_here" | "not_checked"; note: string };
+export type PageLine = {
+  latex: string;
+  handwritten: boolean;
+  y: number;
+  x0: number;
+  x1: number;
+  /** This line starts a new problem (a new problem number, or a printed problem). */
+  newProblem?: boolean;
+};
+export type LineMark = {
+  latex: string;
+  status: "ok" | "look_here" | "not_checked";
+  note: string;
+  /** Who marked it: the math engine (instant, free) or the tutor. */
+  by?: "engine" | "tutor";
+  /** The line is a finished answer ("x = 5") that follows from the work above. */
+  solved?: boolean;
+};
+
+/** How long the last photo took to handle, in milliseconds, for tuning. */
+export type DeskTiming = { readMs: number; engineMs: number; tutorMs: number | null; at: string };
 
 /** What the desk camera has seen in a session, and what the tutor has said about it. */
 export type DeskState = {
@@ -85,6 +104,7 @@ export type DeskState = {
   snapshotId: number | null;
   unreadable: string | null;
   lastTutorAt: string | null;
+  timing?: DeskTiming;
 };
 
 /** Usage numbers for one Claude call (for cost tracking). */

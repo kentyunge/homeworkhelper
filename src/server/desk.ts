@@ -5,6 +5,7 @@ import { db } from "@/db";
 import { account, kids, stations, turns, tutorSessions, type DeskState, type LineMark, type PageLine } from "@/db/schema";
 import type { TutorReply } from "@/lib/tutor-reply";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "./errors";
+import { compareLines, isSolutionLine } from "@/lib/math-check";
 import { getKid } from "./family";
 import { engine, flagSession, sendKidTurn, startSession, TutorError } from "./tutor";
 import { deleteUpload, getUpload, saveUpload } from "./uploads";
@@ -246,11 +247,59 @@ export function isNewPage(before: PageLine[], after: PageLine[]) {
   return !after.some((l) => seen.has(l.latex.replace(/\s/g, "")));
 }
 
-/** The message the tutor gets: every line on the page, numbered, with the unchecked ones marked NEW. */
-export function deskMessage(desk: DeskState, fresh: number[], requested: boolean) {
+/**
+ * The math engine's first pass over new lines: a quiet ✓ when a line follows from the one above,
+ * a ? when it doesn't, and nothing (left for the tutor) when it can't tell. Lines after the first
+ * mistake in a problem aren't marked, since they build on it.
+ */
+export function engineCheck(desk: DeskState, fresh: number[]) {
+  const marks: LineMark[] = desk.marks.slice(0, desk.lines.length);
+  const forTutor: number[] = [];
+  const wrong: { line: number; ref: number }[] = [];
+  const problemStart = (i: number) => {
+    let start = 0;
+    for (let k = 0; k <= i; k++) if (desk.lines[k].newProblem) start = k;
+    return start;
+  };
+  for (const i of [...fresh].sort((a, b) => a - b)) {
+    const line = desk.lines[i];
+    const mark = (status: LineMark["status"], extra: Partial<LineMark> = {}) =>
+      (marks[i] = { latex: line.latex, status, note: "", by: "engine", ...extra });
+    const start = problemStart(i);
+    if (i === start) {
+      mark("not_checked"); // the first line of a problem: nothing above it to compare with
+      continue;
+    }
+    const afterMistake = desk.lines
+      .slice(start, i)
+      .some((l, k) => marks[start + k]?.status === "look_here" && marks[start + k]?.latex === l.latex);
+    if (afterMistake) {
+      mark("not_checked");
+      continue;
+    }
+    const verdict = compareLines(desk.lines[i - 1].latex, line.latex);
+    if (verdict === "same") mark("ok", isSolutionLine(line.latex) ? { solved: true } : {});
+    else if (verdict === "different") {
+      mark("look_here");
+      wrong.push({ line: i, ref: i - 1 });
+      forTutor.push(i);
+    } else forTutor.push(i);
+  }
+  for (let i = 0; i < desk.lines.length; i++) if (!marks[i]) marks[i] = { latex: "", status: "not_checked", note: "" };
+  return { marks, forTutor, wrong };
+}
+
+/** The message the tutor gets: every line on the page, numbered, with the ones to check marked NEW. */
+export function deskMessage(desk: DeskState, fresh: number[], requested: boolean, wrong: { line: number; ref: number }[] = []) {
   const lines = desk.lines.map((l, i) => {
-    const tag = !l.handwritten ? "(printed) " : fresh.includes(i) ? "NEW: " : "";
-    return `${i + 1}. ${tag}$${l.latex}$`;
+    const m = desk.marks[i];
+    if (!l.handwritten) return `${i + 1}. (printed) $${l.latex}$`;
+    if (fresh.includes(i)) {
+      const w = wrong.find((x) => x.line === i);
+      return `${i + 1}. NEW: $${l.latex}$${w ? ` [math checker: does not follow from line ${w.ref + 1}]` : ""}`;
+    }
+    const checked = m?.by === "engine" && m.status === "ok" && m.latex === l.latex;
+    return `${i + 1}. $${l.latex}$${checked ? " [math checker: follows from the line above]" : ""}`;
   });
   return [
     "[Desk camera] The lines on the page now:",
@@ -261,13 +310,16 @@ export function deskMessage(desk: DeskState, fresh: number[], requested: boolean
     .join("\n");
 }
 
-/** Copy the tutor's marks (from its workReview block) onto the page lines it checked. */
+/** Copy the tutor's marks (from its workReview block) onto the lines it checked; keep the engine's otherwise. */
 export function applyMarks(desk: DeskState, fresh: number[], reply: TutorReply): LineMark[] {
   const marks = desk.marks.slice(0, desk.lines.length);
   const review = reply.show.flatMap((b) => (b.type === "workReview" ? b.lines : []));
   for (const i of fresh) {
     const r = review.find((l) => l.pageLine === i + 1);
-    marks[i] = { latex: desk.lines[i].latex, status: r?.status ?? "not_checked", note: r?.note ?? "" };
+    const engine = marks[i]?.by === "engine" && marks[i]?.latex === desk.lines[i].latex ? marks[i] : null;
+    marks[i] = r
+      ? { latex: desk.lines[i].latex, status: r.status, note: r.note, by: "tutor", ...(engine?.solved && r.status === "ok" ? { solved: true } : {}) }
+      : (engine ?? { latex: desk.lines[i].latex, status: "not_checked", note: "" });
   }
   for (let i = 0; i < desk.lines.length; i++) if (!marks[i]) marks[i] = { latex: "", status: "not_checked", note: "" };
   return marks;
@@ -278,24 +330,34 @@ async function saveDesk(sessionId: number, desk: DeskState) {
 }
 
 /**
- * Ask the tutor about the new lines, if there are any and it's been long enough since the last check
- * (or the kid asked). Call while holding the station lock.
+ * Check the new lines: the math engine first (instant), then the tutor for mistakes, for lines the
+ * engine can't judge (at most every MIN_CHECK_GAP_MS while writing continues), or when the kid tapped
+ * Check now. Call while holding the station lock.
  */
 async function maybeCheck(sessionId: number, kidId: number, desk: DeskState, requested: boolean) {
   const fresh = uncheckedLines(desk);
-  if (!fresh.length && !requested) return null;
-  if (!fresh.length && requested && !desk.lines.length) return null;
-  const since = desk.lastTutorAt ? Date.now() - new Date(desk.lastTutorAt).getTime() : Infinity;
-  if (!requested && since < MIN_CHECK_GAP_MS) return null;
+  if (!fresh.length && !(requested && desk.lines.length)) return { turn: null, desk, engineMs: 0, tutorMs: null };
 
+  const t0 = Date.now();
+  const { marks, forTutor, wrong } = engineCheck(desk, fresh);
+  let next: DeskState = { ...desk, marks };
+  const engineMs = Date.now() - t0;
+  await saveDesk(sessionId, next); // the station shows ✓ and ? right away
+
+  const since = desk.lastTutorAt ? Date.now() - new Date(desk.lastTutorAt).getTime() : Infinity;
+  const ask = requested || wrong.length > 0 || (forTutor.length > 0 && since >= MIN_CHECK_GAP_MS);
+  if (!ask) return { turn: null, desk: next, engineMs, tutorMs: null };
+
+  const t1 = Date.now();
+  const toCheck = requested ? fresh : forTutor;
   const turn = await sendKidTurn(sessionId, kidId, {
-    text: deskMessage(desk, fresh, requested),
+    text: deskMessage(next, toCheck, requested, wrong),
     source: "desk",
     snapshotId: desk.snapshotId ?? undefined,
   });
-  const next: DeskState = { ...desk, marks: applyMarks(desk, fresh, turn.reply), lastTutorAt: new Date().toISOString() };
+  next = { ...next, marks: applyMarks(next, toCheck, turn.reply), lastTutorAt: new Date().toISOString() };
   await saveDesk(sessionId, next);
-  return turn;
+  return { turn, desk: next, engineMs, tutorMs: Date.now() - t1 };
 }
 
 /**
@@ -315,6 +377,7 @@ export async function handleFrame(station: Station, image: Buffer, mediaType: st
     const upload = await saveUpload(session.kidId, mediaType, image);
     const before = session.desk ?? emptyDesk();
     let reading;
+    const t0 = Date.now();
     try {
       reading = await engine().readPage(image, mediaType, before.lines);
     } catch (e) {
@@ -322,6 +385,7 @@ export async function handleFrame(station: Station, image: Buffer, mediaType: st
       await deleteUpload(upload.id);
       throw e;
     }
+    const readMs = Date.now() - t0;
 
     if (reading.unreadable && reading.lines.length === 0) {
       await saveDesk(session.id, { ...before, unreadable: reading.unreadable });
@@ -342,9 +406,12 @@ export async function handleFrame(station: Station, image: Buffer, mediaType: st
       await db.update(tutorSessions).set({ lastActivityAt: new Date() }).where(eq(tutorSessions.id, session.id));
     }
     // A partly covered page isn't checked until it can be read clearly.
-    const turn = reading.unreadable ? null : await maybeCheck(session.id, session.kidId, desk, wasRequested);
+    const check = reading.unreadable ? null : await maybeCheck(session.id, session.kidId, desk, wasRequested);
+    const timing = { readMs, engineMs: check?.engineMs ?? 0, tutorMs: check?.tutorMs ?? null, at: new Date().toISOString() };
+    await saveDesk(session.id, { ...(check?.desk ?? desk), timing });
+    console.log(`[desk] station ${station.id}: read ${readMs} ms, engine ${timing.engineMs} ms, tutor ${timing.tutorMs ?? "-"} ms`);
     if (station.lastError) await db.update(stations).set({ lastError: null, lastErrorAt: null }).where(eq(stations.id, station.id));
-    return { status: "read" as const, lines: desk.lines.length, checked: !!turn };
+    return { status: "read" as const, lines: desk.lines.length, checked: !!check?.turn, timing };
   } catch (e) {
     await recordError(station.id, e);
     throw e;

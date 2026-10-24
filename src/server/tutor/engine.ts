@@ -125,6 +125,9 @@ const ReadingSchema = z.object({
     z.object({
       latex: z.string().describe("The line as LaTeX, without $ delimiters. Copy exactly what is written, mistakes included."),
       handwritten: z.boolean().describe("true for the student's writing, false for printed text (e.g. the worksheet's problem)"),
+      newProblem: z
+        .boolean()
+        .describe("true if this line starts a new problem: a printed problem, a problem number like '2.' or 'b)', or work clearly separate from the lines above"),
       y: z.number().describe("Vertical center of the line, as a fraction of the image height (0 = top, 1 = bottom)"),
       x0: z.number().describe("Left end of the line, as a fraction of the image width"),
       x1: z.number().describe("Right end of the line, as a fraction of the image width"),
@@ -138,7 +141,7 @@ const ReadingSchema = z.object({
 
 const READER_SYSTEM = `You read a student's math work from a photo taken by a camera looking straight down at their desk.
 
-List every line of math on the paper, top to bottom, as LaTeX. Copy exactly what is written, including mistakes: never correct, finish, or tidy up the student's work. A line is one step of work (usually one equation or expression). Mark printed text (a worksheet's problems) as handwritten = false. Skip doodles, names, dates and crossed-out work.
+List every line of math on the paper, top to bottom, as LaTeX. Copy exactly what is written, including mistakes: never correct, finish, or tidy up the student's work. A line is one step of work (usually one equation or expression); don't include problem numbers like "2." in the LaTeX, but mark that line as starting a new problem. Mark printed text (a worksheet's problems) as handwritten = false. Skip doodles, names, dates and crossed-out work.
 
 You'll also get the lines read from the previous photo. When a line is unchanged, return the same LaTeX character for character, so changes are easy to spot.
 
@@ -203,7 +206,14 @@ export class ClaudeEngine implements TutorEngine {
     const clamp = (n: number) => Math.min(1, Math.max(0, Number.isFinite(n) ? n : 0));
     const lines = out.lines
       .filter((l) => l.latex.trim())
-      .map((l) => ({ latex: l.latex.trim(), handwritten: l.handwritten, y: clamp(l.y), x0: clamp(l.x0), x1: clamp(l.x1) }));
+      .map((l) => ({
+        latex: l.latex.trim(),
+        handwritten: l.handwritten,
+        newProblem: l.newProblem,
+        y: clamp(l.y),
+        x0: clamp(l.x0),
+        x1: clamp(l.x1),
+      }));
     return { lines, unreadable: out.unreadable, usage: usageOf(response.model, response.usage) };
   }
 

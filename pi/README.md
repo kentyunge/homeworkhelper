@@ -83,7 +83,7 @@ To rename it later (the kids can help pick a name), use the pencil button next t
 
 1. Tap your name, enter your PIN.
 2. Put the paper under the camera and write each step on its own line.
-3. The screen shows the latest photo of the page with a **✓** beside each line that's right and a **?** on the first line to look at again. The tutor talks only when it matters.
+3. A few seconds after each line, the screen shows the page with a **✓** beside each line that's right and a **?** on the first line to look at again. A math checker marks most lines on its own; the tutor talks only when it matters (a mistake, something the checker can't judge, or a finished problem).
 4. **Check now** looks right away, **Hint** asks for a hint, **Flag** saves it to go over with a parent, **Pause** stops watching, **Done** ends.
 
 The same conversation shows up on the Chromebook, where you can type, read longer explanations, and see the photos. If she starts on the Chromebook first, tapping her name on the station joins that conversation.
@@ -94,7 +94,7 @@ After 4 quiet minutes the station offers a hint. After 15 it stops watching. Wit
 
 - The camera sends a photo only while someone is signed in at the station and new writing appears. Otherwise everything stays on the Pi, and with nobody at the desk the station doesn't contact the app at all.
 - Photos are deleted from the app after 30 days.
-- Reading each photo uses a low-cost model, a fraction of a cent. The tutor looks at most every 12 seconds while writing continues, so an hour of homework is roughly $0.30–$1.50.
+- Reading each photo uses a low-cost model, a fraction of a cent. The tutor looks at most every 12 seconds while writing continues, and most lines are checked by a free math checker, so an hour of homework should be well under a dollar.
 
 ## Troubleshooting
 

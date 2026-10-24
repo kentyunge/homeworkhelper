@@ -5,7 +5,7 @@ import type { PageReading, TutorEngine, TutorResult } from "./engine";
 
 /** The page the demo "camera" sees, one more line each photo: a printed problem, then the student's work. */
 const DEMO_PAGE: PageLine[] = [
-  { latex: "3(x-4)=2x+5", handwritten: false, y: 0.14, x0: 0.12, x1: 0.48 },
+  { latex: "3(x-4)=2x+5", handwritten: false, newProblem: true, y: 0.14, x0: 0.12, x1: 0.48 },
   { latex: "3x-12=2x+5", handwritten: true, y: 0.3, x0: 0.14, x1: 0.5 },
   { latex: "x-12=5", handwritten: true, y: 0.44, x0: 0.18, x1: 0.42 },
   { latex: "x=-7", handwritten: true, y: 0.58, x0: 0.2, x1: 0.36 },
@@ -13,7 +13,7 @@ const DEMO_PAGE: PageLine[] = [
 
 /** A reply to a "[Desk camera]" update: checks each NEW line, and only speaks up about a mistake. */
 function deskReply(text: string): TutorReply {
-  const fresh = [...text.matchAll(/^(\d+)\. NEW: \$(.*)\$$/gm)].map((m) => ({ n: Number(m[1]), latex: m[2] }));
+  const fresh = [...text.matchAll(/^(\d+)\. NEW: \$(.*?)\$/gm)].map((m) => ({ n: Number(m[1]), latex: m[2] }));
   const wrong = fresh.find((l) => l.latex.replace(/\s/g, "") === "x=-7");
   const lines = fresh.map((l) => ({
     math: l.latex,
