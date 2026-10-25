@@ -161,7 +161,7 @@ export function StationView() {
         return;
       }
       refresh(active);
-    }, active ? 2500 : 10_000);
+    }, active ? 1000 : 10_000);
     return () => clearInterval(t);
   }, [token, active, refresh]);
 
@@ -519,6 +519,8 @@ function Big({
 
 /** The last photo of the page, with the tutor's marks beside each line. */
 function PageView({ desk, token }: { desk: DeskState; token: string }) {
+  // A new photo is shown as soon as it arrives; its marks appear once it's been read.
+  const reading = desk.linesSnapshotId != null && desk.linesSnapshotId !== desk.snapshotId;
   const [src, setSrc] = useState<string | null>(null);
   const [ratio, setRatio] = useState(4 / 3);
   const loaded = useRef<number | null>(null);
@@ -560,7 +562,7 @@ function PageView({ desk, token }: { desk: DeskState; token: string }) {
         className="h-full w-full rounded-xl object-contain"
         onLoad={(e) => setRatio(e.currentTarget.naturalWidth / e.currentTarget.naturalHeight || 4 / 3)}
       />
-      {desk.lines.map((l, i) => {
+      {!reading && desk.lines.map((l, i) => {
         if (!l.handwritten) return null;
         const m = desk.marks[i]?.latex === l.latex ? desk.marks[i] : null;
         const status = m?.status ?? "pending";
@@ -588,6 +590,11 @@ function PageView({ desk, token }: { desk: DeskState; token: string }) {
           </div>
         );
       })}
+      {reading && (
+        <div className="bg-background/80 absolute top-3 right-3 flex items-center gap-2 rounded-full px-3 py-1 text-sm">
+          <span className="orb-core inline-block size-3 rounded-full" aria-hidden /> Reading…
+        </div>
+      )}
       {desk.unreadable && (
         <div className="bg-background/80 absolute inset-x-3 bottom-3 rounded-lg px-3 py-2 text-sm">
           <Markdown>{`Can't read the page right now: ${desk.unreadable}`}</Markdown>

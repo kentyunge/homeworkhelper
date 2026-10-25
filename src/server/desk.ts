@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import { and, desc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { verifyPassword } from "better-auth/crypto";
 import { db } from "@/db";
-import { account, kids, stations, turns, tutorSessions, type SoundCheckResult, type StationSpeech, type DeskState, type LineMark, type PageLine } from "@/db/schema";
+import { account, kids, stations, turns, tutorSessions, type PendingTutor, type SoundCheckResult, type StationSpeech, type DeskState, type LineMark, type PageLine } from "@/db/schema";
 import type { TutorReply } from "@/lib/tutor-reply";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "./errors";
 import { compareLines, isSolutionLine } from "@/lib/math-check";
@@ -325,44 +325,111 @@ export function applyMarks(desk: DeskState, fresh: number[], reply: TutorReply):
   return marks;
 }
 
-async function saveDesk(sessionId: number, desk: DeskState) {
-  await db.update(tutorSessions).set({ desk }).where(eq(tutorSessions.id, sessionId));
+/**
+ * Change a session's desk state under a row lock, from its latest saved value. Reading photos and the
+ * tutor run at the same time, so each applies its change to the current state instead of overwriting it.
+ */
+async function updateDesk(sessionId: number, change: (desk: DeskState) => DeskState): Promise<DeskState> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx.select({ desk: tutorSessions.desk }).from(tutorSessions).where(eq(tutorSessions.id, sessionId)).for("update");
+    const next = change(row?.desk ?? emptyDesk());
+    await tx.update(tutorSessions).set({ desk: next }).where(eq(tutorSessions.id, sessionId));
+    return next;
+  });
+}
+
+/** Lines waiting for the tutor, merged with any still waiting from earlier photos. */
+function mergePending(prev: PendingTutor | null | undefined, lines: number[], wrong: { line: number; ref: number }[], requested: boolean, desk: DeskState): PendingTutor | null {
+  const all = new Map<number, string>();
+  for (const p of prev?.lines ?? []) if (desk.lines[p.i]?.latex === p.latex) all.set(p.i, p.latex);
+  for (const i of lines) all.set(i, desk.lines[i].latex);
+  const keepWrong = [...(prev?.wrong ?? []).filter((w) => all.has(w.line) && !wrong.some((x) => x.line === w.line)), ...wrong];
+  const req = requested || !!prev?.requested;
+  if (!all.size && !req) return null;
+  return { lines: [...all].map(([i, latex]) => ({ i, latex })).sort((x, y) => x.i - y.i), wrong: keepWrong, requested: req };
 }
 
 /**
- * Check the new lines: the math engine first (instant), then the tutor for mistakes, for lines the
- * engine can't judge (at most every MIN_CHECK_GAP_MS while writing continues), or when the kid tapped
- * Check now. Call while holding the station lock.
+ * The math engine's pass over new lines (instant). Lines that need the tutor (mistakes, ones the engine
+ * can't judge, or everything when the kid tapped Check now) are queued for it.
  */
-async function maybeCheck(sessionId: number, kidId: number, desk: DeskState, requested: boolean) {
+export function checkWithEngine(desk: DeskState, requested: boolean) {
   const fresh = uncheckedLines(desk);
-  if (!fresh.length && !(requested && desk.lines.length)) return { turn: null, desk, engineMs: 0, tutorMs: null };
-
   const t0 = Date.now();
   const { marks, forTutor, wrong } = engineCheck(desk, fresh);
-  let next: DeskState = { ...desk, marks };
-  const engineMs = Date.now() - t0;
-  await saveDesk(sessionId, next); // the station shows ✓ and ? right away
+  const next: DeskState = { ...desk, marks };
+  const queue = requested ? fresh : forTutor;
+  next.pendingTutor = mergePending(desk.pendingTutor, queue, wrong, requested && desk.lines.length > 0, next);
+  const counts = { ok: fresh.filter((i) => marks[i]?.status === "ok").length, wrong: wrong.length, unknown: forTutor.length - wrong.length };
+  return { desk: next, engineMs: Date.now() - t0, counts };
+}
 
+/** Is it time for the tutor? Right away for mistakes and Check now; lines it can't judge wait for the gap. */
+function tutorDue(desk: DeskState) {
+  const p = desk.pendingTutor;
+  if (!p) return false;
+  if (p.requested || p.wrong.length) return true;
   const since = desk.lastTutorAt ? Date.now() - new Date(desk.lastTutorAt).getTime() : Infinity;
-  const ask = requested || wrong.length > 0 || (forTutor.length > 0 && since >= MIN_CHECK_GAP_MS);
-  if (!ask) return { turn: null, desk: next, engineMs, tutorMs: null };
+  return since >= MIN_CHECK_GAP_MS;
+}
 
-  const t1 = Date.now();
-  const toCheck = requested ? fresh : forTutor;
-  const turn = await sendKidTurn(sessionId, kidId, {
-    text: deskMessage(next, toCheck, requested, wrong),
-    source: "desk",
-    snapshotId: desk.snapshotId ?? undefined,
+/** Only one tutor check per station at a time (separate from reading photos). */
+async function lockTutor(stationId: number) {
+  const stale = new Date(Date.now() - BUSY_TIMEOUT_MS);
+  const rows = await db
+    .update(stations)
+    .set({ tutorBusySince: new Date() })
+    .where(and(eq(stations.id, stationId), or(isNull(stations.tutorBusySince), lt(stations.tutorBusySince, stale))))
+    .returning({ id: stations.id });
+  return rows.length > 0;
+}
+async function unlockTutor(stationId: number) {
+  await db.update(stations).set({ tutorBusySince: null }).where(eq(stations.id, stationId));
+}
+
+/** Ask the tutor about the queued lines, then put its marks on the lines that are still there. */
+async function runTutor(sessionId: number, kidId: number) {
+  let pending: PendingTutor | null = null;
+  const desk = await updateDesk(sessionId, (d) => {
+    pending = d.pendingTutor ?? null;
+    return { ...d, pendingTutor: null };
   });
-  next = { ...next, marks: applyMarks(next, toCheck, turn.reply), lastTutorAt: new Date().toISOString() };
-  await saveDesk(sessionId, next);
-  return { turn, desk: next, engineMs, tutorMs: Date.now() - t1 };
+  const job = pending as PendingTutor | null;
+  if (!job) return null;
+  const toCheck = job.lines.filter((p) => desk.lines[p.i]?.latex === p.latex).map((p) => p.i);
+  if (!toCheck.length && !job.requested) return null;
+
+  const t0 = Date.now();
+  let turn;
+  try {
+    turn = await sendKidTurn(sessionId, kidId, {
+      text: deskMessage(desk, toCheck, job.requested, job.wrong.filter((w) => toCheck.includes(w.line))),
+      source: "desk",
+      snapshotId: desk.linesSnapshotId ?? desk.snapshotId ?? undefined,
+    });
+  } catch (e) {
+    // Put the work back so it's tried again on the next tick.
+    await updateDesk(sessionId, (d) => ({ ...d, pendingTutor: mergePending(d.pendingTutor, toCheck, job.wrong, job.requested, d) }));
+    throw e;
+  }
+  const tutorMs = Date.now() - t0;
+  await updateDesk(sessionId, (d) => {
+    const still = toCheck.filter((i) => d.lines[i]?.latex === desk.lines[i].latex);
+    return {
+      ...d,
+      marks: applyMarks(d, still, turn.reply),
+      lastTutorAt: new Date().toISOString(),
+      timing: d.timing ? { ...d.timing, tutorMs } : d.timing,
+    };
+  });
+  console.log(`[desk] session ${sessionId}: tutor ${tutorMs} ms for ${toCheck.length} line(s)`);
+  return { turn, tutorMs };
 }
 
 /**
- * A photo from the station's camera. Reads it, updates what's on the page, and asks the tutor when
- * there's new work. Ignored when nothing is being watched or the station is paused.
+ * A photo from the station's camera. Shows it right away, reads it, runs the math check, and queues
+ * anything the tutor should look at (the station's tick runs the tutor, so photos keep flowing).
+ * Ignored when nothing is being watched or the station is paused.
  */
 export async function handleFrame(station: Station, image: Buffer, mediaType: string, requested: boolean) {
   requireApproved(station);
@@ -375,43 +442,52 @@ export async function handleFrame(station: Station, image: Buffer, mediaType: st
     if (station.captureRequested) await db.update(stations).set({ captureRequested: false }).where(eq(stations.id, station.id));
 
     const upload = await saveUpload(session.kidId, mediaType, image);
-    const before = session.desk ?? emptyDesk();
+    // Show the new photo straight away; its marks follow once it's read.
+    const before = await updateDesk(session.id, (d) => ({ ...d, linesSnapshotId: d.linesSnapshotId ?? d.snapshotId ?? null, snapshotId: upload.id }));
     let reading;
     const t0 = Date.now();
     try {
       reading = await engine().readPage(image, mediaType, before.lines);
     } catch (e) {
       // Don't keep photos that couldn't be read; the camera tries again shortly.
+      await updateDesk(session.id, (d) => ({ ...d, snapshotId: d.snapshotId === upload.id ? (d.linesSnapshotId ?? null) : d.snapshotId }));
       await deleteUpload(upload.id);
       throw e;
     }
     const readMs = Date.now() - t0;
 
     if (reading.unreadable && reading.lines.length === 0) {
-      await saveDesk(session.id, { ...before, unreadable: reading.unreadable });
+      await updateDesk(session.id, (d) => ({ ...d, unreadable: reading.unreadable }));
       return { status: "unreadable" as const, reason: reading.unreadable };
     }
-    const newPage = isNewPage(before.lines, reading.lines);
-    const changed = newPage || JSON.stringify(before.lines.map((l) => l.latex)) !== JSON.stringify(reading.lines.map((l) => l.latex));
-    const desk: DeskState = {
-      lines: reading.lines,
-      marks: newPage ? [] : before.marks,
-      snapshotId: upload.id,
-      unreadable: reading.unreadable,
-      lastTutorAt: before.lastTutorAt,
-    };
-    await saveDesk(session.id, desk);
+
+    let changed = false;
+    let result: ReturnType<typeof checkWithEngine> | null = null;
+    await updateDesk(session.id, (d) => {
+      const newPage = isNewPage(d.lines, reading.lines);
+      changed = newPage || JSON.stringify(d.lines.map((l) => l.latex)) !== JSON.stringify(reading.lines.map((l) => l.latex));
+      const read: DeskState = {
+        ...d,
+        lines: reading.lines,
+        marks: newPage ? [] : d.marks,
+        pendingTutor: newPage ? null : d.pendingTutor,
+        linesSnapshotId: upload.id,
+        unreadable: reading.unreadable,
+      };
+      // A partly covered page isn't checked until it can be read clearly.
+      if (reading.unreadable && !wasRequested) return read;
+      result = checkWithEngine(read, wasRequested);
+      return { ...result.desk, timing: { readMs, engineMs: result.engineMs, tutorMs: null, at: new Date().toISOString(), check: result.counts } };
+    });
     if (changed) {
       await db.update(stations).set({ lastChangeAt: new Date(), nudgedAt: null }).where(eq(stations.id, station.id));
       await db.update(tutorSessions).set({ lastActivityAt: new Date() }).where(eq(tutorSessions.id, session.id));
     }
-    // A partly covered page isn't checked until it can be read clearly.
-    const check = reading.unreadable ? null : await maybeCheck(session.id, session.kidId, desk, wasRequested);
-    const timing = { readMs, engineMs: check?.engineMs ?? 0, tutorMs: check?.tutorMs ?? null, at: new Date().toISOString() };
-    await saveDesk(session.id, { ...(check?.desk ?? desk), timing });
-    console.log(`[desk] station ${station.id}: read ${readMs} ms, engine ${timing.engineMs} ms, tutor ${timing.tutorMs ?? "-"} ms`);
+    const r = result as ReturnType<typeof checkWithEngine> | null;
+    const timing = { readMs, engineMs: r?.engineMs ?? 0, check: r?.counts ?? null };
+    console.log(`[desk] station ${station.id}: read ${readMs} ms, engine ${timing.engineMs} ms, ${JSON.stringify(timing.check)}`);
     if (station.lastError) await db.update(stations).set({ lastError: null, lastErrorAt: null }).where(eq(stations.id, station.id));
-    return { status: "read" as const, lines: desk.lines.length, checked: !!check?.turn, timing };
+    return { status: "read" as const, lines: reading.lines.length, queuedForTutor: !!r?.desk.pendingTutor, timing };
   } catch (e) {
     await recordError(station.id, e);
     throw e;
@@ -459,13 +535,13 @@ export async function tick(station: Station) {
     nudge = true;
   }
   const [session] = await db.select().from(tutorSessions).where(eq(tutorSessions.id, station.activeSessionId));
-  if (session?.desk && uncheckedLines(session.desk).length && (await lock(station.id))) {
+  if (session?.desk && tutorDue(session.desk) && (await lockTutor(station.id))) {
     try {
-      await maybeCheck(session.id, session.kidId, session.desk, false);
+      await runTutor(session.id, session.kidId);
     } catch (e) {
       await recordError(station.id, e);
     } finally {
-      await unlock(station.id);
+      await unlockTutor(station.id);
     }
   }
   return { nudge };
@@ -509,7 +585,7 @@ export async function stationState(station: Station) {
         voiceId: row.kid.voiceId,
       },
       paused: station.paused,
-      busy: !!station.busySince && Date.now() - station.busySince.getTime() < BUSY_TIMEOUT_MS,
+      busy: [station.busySince, station.tutorBusySince].some((t) => !!t && Date.now() - t.getTime() < BUSY_TIMEOUT_MS),
       startedAt: station.startedAt,
       desk: row.s.desk ?? emptyDesk(),
       lastReply: last ? { turnId: last.id, say: last.reply?.say ?? "" } : null,
