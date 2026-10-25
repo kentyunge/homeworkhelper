@@ -181,6 +181,8 @@ export class ClaudeEngine implements TutorEngine {
       response = await this.client.beta.messages.parse({
         model: READER_MODEL,
         max_tokens: 8000,
+        // Copying handwriting needs no step-by-step reasoning; skipping it makes reading much faster.
+        thinking: { type: "disabled" },
         output_config: { effort: "low", format: betaZodOutputFormat(ReadingSchema) },
         system: READER_SYSTEM,
         messages: [

@@ -93,8 +93,22 @@ export type LineMark = {
   solved?: boolean;
 };
 
-/** How long the last photo took to handle, in milliseconds, for tuning. */
-export type DeskTiming = { readMs: number; engineMs: number; tutorMs: number | null; at: string };
+/** How long the last photo took to handle, in milliseconds, and what the math checker made of it. */
+export type DeskTiming = {
+  readMs: number;
+  engineMs: number;
+  tutorMs: number | null;
+  at: string;
+  /** New lines the checker found right, found wrong, and couldn't judge (sent to the tutor). */
+  check?: { ok: number; wrong: number; unknown: number };
+};
+
+/** Lines waiting for the tutor. The tutor runs separately from reading photos, so new photos keep coming. */
+export type PendingTutor = {
+  lines: { i: number; latex: string }[];
+  wrong: { line: number; ref: number }[];
+  requested: boolean;
+};
 
 /** What the desk camera has seen in a session, and what the tutor has said about it. */
 export type DeskState = {
@@ -105,6 +119,9 @@ export type DeskState = {
   unreadable: string | null;
   lastTutorAt: string | null;
   timing?: DeskTiming;
+  /** The photo `lines` were read from. Newer than snapshotId's lines while a photo is being read. */
+  linesSnapshotId?: number | null;
+  pendingTutor?: PendingTutor | null;
 };
 
 /** Usage numbers for one Claude call (for cost tracking). */
@@ -167,6 +184,8 @@ export const stations = pgTable("stations", {
   captureRequested: boolean("capture_requested").notNull().default(false),
   /** Set while a photo is being read or the tutor is replying, so only one runs at a time. */
   busySince: timestamp("busy_since", { withTimezone: true }),
+  /** Set while the tutor is checking lines, so only one tutor check runs at a time. */
+  tutorBusySince: timestamp("tutor_busy_since", { withTimezone: true }),
   /** Last time new writing appeared. Drives the "want a hint?" nudge and the idle stop. */
   lastChangeAt: timestamp("last_change_at", { withTimezone: true }),
   nudgedAt: timestamp("nudged_at", { withTimezone: true }),

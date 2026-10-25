@@ -160,7 +160,8 @@ describe("watching the page", () => {
     const marksNow = async () => (await db.select().from(tutorSessions).where(eq(tutorSessions.id, sessionId)))[0].desk!.marks;
 
     eng.pages.push({ lines: [problem, line("3x-12=2x+5")] });
-    expect(await desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).toMatchObject({ status: "read", checked: false });
+    expect(await desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).toMatchObject({ status: "read", queuedForTutor: false });
+    await desk.tick(await station(token));
     vi.setSystemTime(Date.now() + 3_000);
     eng.pages.push({ lines: [problem, line("3x-12=2x+5"), line("x-12=5")] });
     await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
@@ -171,7 +172,11 @@ describe("watching the page", () => {
     vi.setSystemTime(Date.now() + 3_000);
     eng.pages.push({ lines: [problem, line("3x-12=2x+5"), line("x-12=5"), line("x=-7")] });
     const result = await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
-    expect(result).toMatchObject({ status: "read", checked: true, timing: { tutorMs: expect.any(Number) } });
+    expect(result).toMatchObject({ status: "read", queuedForTutor: true, timing: { check: { ok: 0, wrong: 1, unknown: 0 } } });
+    // The ? shows before the tutor has said anything; the station's tick then asks the tutor.
+    expect((await marksNow())[3]).toMatchObject({ status: "look_here", by: "engine" });
+    expect(eng.replies).toHaveLength(0);
+    await desk.tick(await station(token));
     expect(eng.replies).toEqual([
       "[Desk camera] The lines on the page now:\n1. (printed) $3(x-4)=2x+5$\n" +
         "2. $3x-12=2x+5$ [math checker: follows from the line above]\n3. $x-12=5$ [math checker: follows from the line above]\n" +
@@ -184,6 +189,7 @@ describe("watching the page", () => {
     vi.setSystemTime(Date.now() + 3_000);
     eng.pages.push({ lines: [problem, line("3x-12=2x+5"), line("x-12=5"), line("x=-7"), line("-7=x")] });
     await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    await desk.tick(await station(token));
     expect((await marksNow())[4]).toMatchObject({ status: "not_checked" });
     expect(eng.replies).toHaveLength(1);
 
@@ -191,6 +197,52 @@ describe("watching the page", () => {
     const deskTurn = (await db.select().from(turns).where(eq(turns.sessionId, sessionId))).find((t) => t.role === "kid")!;
     expect(deskTurn.kid).toMatchObject({ source: "desk", uploadIds: [] });
     expect(deskTurn.kid?.snapshotId).toBeGreaterThan(0);
+  });
+
+  it("shows the new photo before it has been read", async () => {
+    const { token, sessionId } = await watching();
+    eng.pages.push({ lines: [line("a=1")] });
+    await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    const first = (await db.select().from(tutorSessions).where(eq(tutorSessions.id, sessionId)))[0].desk!;
+    let duringRead: typeof first | null = null;
+    eng.readPage = async () => {
+      duringRead = (await db.select().from(tutorSessions).where(eq(tutorSessions.id, sessionId)))[0].desk;
+      return { lines: [line("a=1"), line("b=2")], unreadable: null, usage: null };
+    };
+    await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    const mid = duringRead as unknown as typeof first;
+    expect(mid.snapshotId).not.toBe(first.snapshotId); // the new photo is up
+    expect(mid.linesSnapshotId).toBe(first.snapshotId); // its lines (and marks) are still the old photo's
+    const after = (await db.select().from(tutorSessions).where(eq(tutorSessions.id, sessionId)))[0].desk!;
+    expect(after.linesSnapshotId).toBe(after.snapshotId);
+  });
+
+  it("keeps reading photos while the tutor is busy, without losing either's marks", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { token, sessionId } = await watching();
+    const problem = { ...line("2x=10", false), newProblem: true };
+    eng.pages.push({ lines: [problem, line("x=20")] });
+    await desk.handleFrame(await station(token), JPEG, "image/jpeg", false); // wrong: queued for the tutor
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const reply = eng.reply.bind(eng);
+    eng.reply = async (system, messages) => {
+      await gate;
+      return reply(system, messages);
+    };
+    const tutoring = desk.tick(await station(token)); // the tutor starts and waits
+
+    // Meanwhile she fixes her work below; that photo is read and checked.
+    await new Promise((r) => setTimeout(r, 50));
+    eng.pages.push({ lines: [problem, line("x=20"), line("x=5")] });
+    expect(await desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).toMatchObject({ status: "read" });
+    release();
+    await tutoring;
+
+    const marks = (await db.select().from(tutorSessions).where(eq(tutorSessions.id, sessionId)))[0].desk!.marks;
+    expect(marks[1]).toMatchObject({ latex: "x=20", status: "look_here", by: "tutor" });
+    expect(marks[2]).toMatchObject({ latex: "x=5", status: "not_checked" }); // after the mistake: left for her to fix above
   });
 
   it("spots a finished answer", async () => {
@@ -207,13 +259,15 @@ describe("watching the page", () => {
     const { token } = await watching();
     eng.pages.push({ lines: [line("x>2"), line("x>2.5")] });
     await desk.handleFrame(await station(token), JPEG, "image/jpeg", false);
+    await desk.tick(await station(token));
     expect(eng.replies).toHaveLength(1);
     expect(eng.replies[0]).toContain("2. NEW: $x>2.5$");
 
     vi.setSystemTime(Date.now() + 5_000);
     eng.pages.push({ lines: [line("x>2"), line("x>2.5"), line("x>3")] });
-    expect(await desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).toMatchObject({ checked: false });
-    expect(eng.replies).toHaveLength(1);
+    expect(await desk.handleFrame(await station(token), JPEG, "image/jpeg", false)).toMatchObject({ queuedForTutor: true });
+    await desk.tick(await station(token));
+    expect(eng.replies).toHaveLength(1); // too soon after the last one
 
     // The station's regular tick picks it up once enough time has passed.
     vi.setSystemTime(Date.now() + desk.MIN_CHECK_GAP_MS);
@@ -232,6 +286,7 @@ describe("watching the page", () => {
     await desk.requestCheck(await station(token));
     expect(desk.cameraState(await station(token)).captureRequested).toBe(true);
     await desk.handleFrame(await station(token), JPEG, "image/jpeg", true);
+    await desk.tick(await station(token));
     expect(eng.replies).toHaveLength(1);
     expect(eng.replies[0]).toContain("(The student tapped Check now.)");
     expect(desk.cameraState(await station(token)).captureRequested).toBe(false);

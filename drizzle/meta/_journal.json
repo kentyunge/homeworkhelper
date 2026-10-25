@@ -29,6 +29,13 @@
       "when": 1792853680812,
       "tag": "0003_station_speech",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792939524310,
+      "tag": "0004_tutor_lock",
+      "breakpoints": true
     }
   ]
 }

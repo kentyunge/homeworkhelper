@@ -629,6 +629,7 @@ function PagePanel({ desk, showTiming }: { desk: DeskState; showTiming: boolean 
       {showTiming && t && (
         <p className="text-muted-foreground mt-2 text-xs">
           Last photo: reading {secs(t.readMs)} · math check {t.engineMs} ms · tutor {t.tutorMs === null ? "not needed" : secs(t.tutorMs)}
+          {t.check && ` · new lines: ${t.check.ok} right, ${t.check.wrong} wrong, ${t.check.unknown} for the tutor`}
         </p>
       )}
     </section>

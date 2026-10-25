@@ -63,15 +63,15 @@ use_desktop_audio()
 APP_URL = os.environ.get("APP_URL", "").rstrip("/")
 TOKEN_FILE = Path(os.environ.get("TOKEN_FILE", HOME / "token"))
 ROTATE = int(os.environ.get("ROTATE", "0"))  # degrees clockwise to rotate photos: 0, 90, 180, 270
-UPLOAD_LONG_SIDE = int(os.environ.get("UPLOAD_LONG_SIDE", "2000"))
+UPLOAD_LONG_SIDE = int(os.environ.get("UPLOAD_LONG_SIDE", "1600"))
 
 LORES = (320, 240)
 STEP_S = 0.4  # how often to look at the low-res view
-STILL_S = 2.0  # the page must be still this long before a photo is sent (hand out of the way)
+STILL_S = 1.2  # the page must be still this long before a photo is sent (hand out of the way)
 MOTION_LEVEL = 3.0  # average pixel change between looks that counts as movement
 INK_DIFF = 28  # how much a pixel must change to count as new ink
 INK_FRACTION = 0.0012  # share of pixels that must change to count as new writing (~90 px at 320x240)
-MIN_UPLOAD_GAP_S = 4.0
+MIN_UPLOAD_GAP_S = 2.0
 AWAKE_AFTER_MOTION_S = 10 * 60  # keep asking the app for instructions this long after movement
 POLL_ACTIVE_S = 3.0
 POLL_WATCHING_S = 1.5  # faster while someone's working, so replies are spoken promptly

@@ -1,0 +1,1 @@
+ALTER TABLE "stations" ADD COLUMN "tutor_busy_since" timestamp with time zone;
